@@ -35,6 +35,17 @@ client.once('ready', () => {
 });
 
 client.on('messageCreate', async (message) => {
+  console.log(`[DEBUG] Message received: ${message.content}`);
+  if (message.author.bot) return;
+
+  if (message.mentions.users.has('JEIKA_DISCORD_USER_ID')) {
+    console.log('[DEBUG] Jeika was mentioned!');
+    // your time check + Airtable saving logic here
+  }
+});
+
+
+client.on('messageCreate', async (message) => {
   if (message.author.bot) return; // Ignore bots
 
   const now = new Date();
