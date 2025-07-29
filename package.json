@@ -1,0 +1,13 @@
+{
+  "name": "mention-queue-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.11.0",
+    "airtable": "^0.12.1",
+    "dotenv": "^16.0.3"
+  }
+}
