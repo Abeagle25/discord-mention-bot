@@ -72,6 +72,8 @@ client.on('messageCreate', async (message) => {
   });
 });
 
+console.log(`[CHECK] Mentioned: ${isMentioned}, Within Hours: ${isWithinHours} (${user.name})`);
+
 client.login(process.env.DISCORD_TOKEN);
 
 const express = require('express');
