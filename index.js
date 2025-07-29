@@ -38,7 +38,7 @@ client.on('messageCreate', async (message) => {
   console.log(`[DEBUG] Message received: ${message.content}`);
   if (message.author.bot) return;
 
-  if (message.mentions.users.has('JEIKA_DISCORD_USER_ID')) {
+  if (message.mentions.users.has('852485920023117854')) {
     console.log('[DEBUG] Jeika was mentioned!');
     // your time check + Airtable saving logic here
   }
