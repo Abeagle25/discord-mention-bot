@@ -1,195 +1,129 @@
-require('dotenv').config();
-const { Client, GatewayIntentBits, SlashCommandBuilder, Collection, REST, Routes } = require('discord.js');
-const Airtable = require('airtable');
+const { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const express = require('express');
-const axios = require('axios');
+const dotenv = require('dotenv');
+const Airtable = require('airtable');
 
-// Initialize Discord client
+dotenv.config();
+
+console.log(`Using DISCORD_TOKEN: ${process.env.DISCORD_TOKEN ? '✅ Set' : '❌ Not Set'}`);
+
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
+const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
+const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME;
+const PORT = process.env.PORT || 10000;
+const COACHES = ['Jeika', 'Tugce'];
+const ACTIVE_HOURS = { start: 3, end: 22 }; // 3AM–10PM
+
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
 
-client.commands = new Collection();
+const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
 
-// Airtable config
-const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID);
-
-// Users to monitor
-const monitoredUsers = [
-  {
-    id: '852485920023117854', // Jeika
-    name: 'Jeika',
-    startHour: 3,
-    endHour: 4
-  },
-  {
-    id: '454775533671284746', // Tugce
-    name: 'Tugce',
-    startHour: 3,
-    endHour: 4
-  }
+// Slash Command: /queue
+const commands = [
+  new SlashCommandBuilder()
+    .setName('queue')
+    .setDescription("See who's currently in the queue for a coach.")
+    .addStringOption(option =>
+      option
+        .setName('coach')
+        .setDescription('Coach name (e.g., Jeika, Tugce)')
+        .setRequired(true)
+        .addChoices(
+          { name: 'Jeika', value: 'Jeika' },
+          { name: 'Tugce', value: 'Tugce' }
+        )
+    )
+    .toJSON(),
 ];
 
-// On bot ready
-client.once('ready', async () => {
-  console.log(`✅ Bot is online as ${client.user.tag}`);
+client.once(Events.ClientReady, async () => {
+  console.log(`🤖 Logged in as ${client.user.tag}`);
 
-  // Register slash commands
-  const commands = [
-    new SlashCommandBuilder()
-      .setName('queue')
-      .setDescription('See the current student queue for a specific coach')
-      .addStringOption(option =>
-        option.setName('coach')
-          .setDescription('Coach name (e.g., Jeika, Tugce)')
-          .setRequired(true)
-      )
-      .toJSON()
-  ];
+  const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
-  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   try {
+    console.log('🔁 Registering slash commands (guild-specific)...');
     await rest.put(
-      Routes.applicationCommands(client.user.id),
+      Routes.applicationGuildCommands(client.user.id, '1211718104703311902'), // Your server ID
       { body: commands }
     );
-    console.log('✅ Slash command /queue registered');
-  } catch (err) {
-    console.error('❌ Failed to register slash commands:', err);
+    console.log('✅ Slash commands registered.');
+  } catch (error) {
+    console.error('❌ Failed to register commands:', error);
   }
 });
 
-// Error handling
-client.on('error', (error) => console.error('❌ Discord client error:', error));
-client.on('shardError', (error) => console.error('❌ Shard error:', error));
-
-// Helper: today's date
-function getToday() {
-  return new Date().toISOString().split('T')[0];
-}
-
-// Handle /queue slash command
-client.on('interactionCreate', async (interaction) => {
+// Respond to /queue command
+client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
   if (interaction.commandName === 'queue') {
     const coach = interaction.options.getString('coach');
-    const today = getToday();
 
     try {
-      const records = await base(process.env.AIRTABLE_TABLE_NAME).select({
-        filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, 'YYYY-MM-DD'), '${today}'))`,
-        sort: [{ field: 'Timestamp', direction: 'asc' }]
-      }).firstPage();
+      const records = await base(AIRTABLE_TABLE_NAME)
+        .select({ filterByFormula: `{Mentioned} = "${coach}"` })
+        .firstPage();
 
-      const usersInQueue = [...new Set(records.map(r => r.fields.User))];
-
-      if (usersInQueue.length === 0) {
-        await interaction.reply({ content: `📭 There are no students currently in the queue for ${coach}.`, ephemeral: true });
+      if (records.length === 0) {
+        await interaction.reply(`There’s no one in the queue for ${coach} right now.`);
       } else {
-        const list = usersInQueue.map((u, i) => `${i + 1}. ${u}`).join('\n');
-        await interaction.reply({ content: `📋 **Current queue for ${coach}:**\n${list}`, ephemeral: true });
+        const names = records.map(record => record.get('user') || 'Unknown User');
+        await interaction.reply(
+          `📝 Queue for ${coach}:\n${names.map((name, i) => `${i + 1}. ${name}`).join('\n')}`
+        );
       }
     } catch (err) {
-      console.error('❌ Error fetching queue:', err);
-      await interaction.reply({ content: `⚠️ There was an error retrieving the queue for ${coach}.`, ephemeral: true });
+      console.error('Error fetching from Airtable:', err);
+      await interaction.reply('⚠️ There was an error fetching the queue. Please try again later.');
     }
   }
 });
 
-// On message received
-client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
+// Monitor mentions outside active hours
+client.on(Events.MessageCreate, async message => {
+  if (message.author.bot || !message.mentions.users.size) return;
 
-  const now = new Date();
-  const currentHour = now.getHours();
-  const today = getToday();
+  const currentHour = new Date().getHours();
 
-  monitoredUsers.forEach(async (user) => {
-    const isMentioned = message.mentions.users.has(user.id);
-    const isWithinHours = currentHour >= user.startHour && currentHour < user.endHour;
+  for (const coach of COACHES) {
+    const mentioned = message.mentions.users.find(user =>
+      user.username.toLowerCase().includes(coach.toLowerCase())
+    );
 
-    if (isMentioned && !isWithinHours) {
-      const filter = `AND({Mentioned} = "${user.name}", {User} = "${message.author.username}", IS_SAME(DATETIME_FORMAT({Timestamp}, 'YYYY-MM-DD'), '${today}'))`;
+    const withinHours = currentHour >= ACTIVE_HOURS.start && currentHour < ACTIVE_HOURS.end;
 
+    console.log(`[CHECK] Mentioned: ${!!mentioned}, Within Hours: ${withinHours} (${coach})`);
+
+    if (mentioned && !withinHours) {
       try {
-        const records = await base(process.env.AIRTABLE_TABLE_NAME).select({
-          filterByFormula: filter,
-          sort: [{ field: 'Timestamp', direction: 'asc' }]
-        }).firstPage();
-
-        if (records.length > 0) {
-          const existing = records[0];
-          const currentMessage = existing.fields.Message || '';
-          const updatedMessage = `${currentMessage}\n- ${message.content}`;
-
-          await base(process.env.AIRTABLE_TABLE_NAME).update(existing.id, {
-            Message: updatedMessage
-          });
-
-          console.log(`📝 Appended message for ${user.name} from ${message.author.username}`);
-        } else {
-          await base(process.env.AIRTABLE_TABLE_NAME).create({
-            Mentioned: user.name,
-            User: message.author.username,
-            Message: message.content,
-            Timestamp: new Date().toISOString(),
-            Channel: message.channel.name || "DM or Unknown"
-          });
-
-          console.log(`📥 New queue entry for ${user.name} from ${message.author.username}`);
-        }
-
-        const queueRecords = await base(process.env.AIRTABLE_TABLE_NAME).select({
-          filterByFormula: `AND({Mentioned} = "${user.name}", IS_SAME(DATETIME_FORMAT({Timestamp}, 'YYYY-MM-DD'), '${today}'))`
-        }).firstPage();
-
-        const studentUsernames = [...new Set(queueRecords.map(r => r.fields.User))];
-        const position = studentUsernames.indexOf(message.author.username) + 1;
-
-        await message.reply({
-          content: `Hey ${message.author.username}, your message has been added to your coach’s queue. You’re number #${position} in line. They’ll get back to you during office hours.`
+        await base(AIRTABLE_TABLE_NAME).create({
+          fields: {
+            user: message.author.username,
+            message: message.content,
+            timestamp: new Date().toISOString(),
+            Mentioned: coach,
+          },
         });
 
-        console.log(`💬 Replied with position #${position} for ${message.author.username}`);
-
-      } catch (err) {
-        console.error('❌ Airtable error:', err);
+        await message.reply(
+          `Hi ${message.author.username}, ${coach} is currently offline.\nYour message has been queued, and they’ll get back to you during support hours (3AM–10PM EST). ✅`
+        );
+        console.log(`📥 Queued mention for ${coach} from ${message.author.username}`);
+      } catch (error) {
+        console.error('Failed to add to Airtable:', error);
       }
     }
-  });
+  }
 });
 
-console.log(`Using DISCORD_TOKEN: ${process.env.DISCORD_TOKEN ? '✅ Set' : '❌ Not Set'}`);
-// Login AFTER events are registered
-client.login(process.env.DISCORD_TOKEN).catch(err => {
-  console.error('❌ Discord login failed:', err);
-});
-
-// Express server for UptimeRobot
+// Keep-alive server (for UptimeRobot)
 const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.get('/', (req, res) => {
-  res.send('✅ Bot is running!');
-});
-
+app.get('/', (req, res) => res.send('Bot is running.'));
 app.listen(PORT, () => {
   console.log(`🌐 Express server running on port ${PORT}`);
 });
-
-// UptimeRobot ping every 4 minutes
-setInterval(() => {
-  const url = process.env.SELF_PING_URL || `https://${process.env.RENDER_EXTERNAL_URL}`;
-  if (url) {
-    axios.get(url)
-      .then(() => console.log('🔁 Self-ping successful'))
-      .catch((err) => console.error('❌ Self-ping failed:', err.message));
-  } else {
-    console.warn('⚠️ SELF_PING_URL not set in .env');
-  }
-}, 240000);
+client.login(DISCORD_TOKEN);
