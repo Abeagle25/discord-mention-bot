@@ -22,13 +22,13 @@ const monitoredUsers = [
     id: '852485920023117854', // Jeika
     name: 'Jeika',
     startHour: 3, // 3 AM
-    endHour: 22   // 10 PM
+    endHour: 4   // 10 PM
   },
   {
     id: '454775533671284746', // Tugce
     name: 'Tugce',
     startHour: 3,
-    endHour: 22
+    endHour: 4
   }
 ];
 
@@ -75,7 +75,7 @@ client.once('ready', () => {
 
   // Start Express server
   const app = express();
-  const PORT = process.env.PORT || 10000;
+  const PORT = process.env.PORT || 3000;
 
   app.get('/', (req, res) => {
     res.send('Bot is running!');
