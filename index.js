@@ -4,9 +4,6 @@ const Airtable = require('airtable');
 const express = require('express');
 const axios = require('axios');
 
-// Login to Discord
-client.login(process.env.DISCORD_TOKEN);
-
 // Initialize Discord client
 const client = new Client({
   intents: [
@@ -15,6 +12,9 @@ const client = new Client({
     GatewayIntentBits.MessageContent
   ]
 });
+
+// Login to Discord
+client.login(process.env.DISCORD_TOKEN);
 
 // Initialize Airtable
 const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID);
