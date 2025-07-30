@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, GatewayIntentBits, SlashCommandBuilder, Collection, REST, Routes } = require('discord.js');
 const Airtable = require('airtable');
 const express = require('express');
 const axios = require('axios');
@@ -12,6 +12,8 @@ const client = new Client({
     GatewayIntentBits.MessageContent
   ]
 });
+
+client.commands = new Collection();
 
 // Airtable config
 const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID);
@@ -33,8 +35,32 @@ const monitoredUsers = [
 ];
 
 // On bot ready
-client.once('ready', () => {
+client.once('ready', async () => {
   console.log(`✅ Bot is online as ${client.user.tag}`);
+
+  // Register slash commands
+  const commands = [
+    new SlashCommandBuilder()
+      .setName('queue')
+      .setDescription('See the current student queue for a specific coach')
+      .addStringOption(option =>
+        option.setName('coach')
+          .setDescription('Coach name (e.g., Jeika, Tugce)')
+          .setRequired(true)
+      )
+      .toJSON()
+  ];
+
+  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+  try {
+    await rest.put(
+      Routes.applicationCommands(client.user.id),
+      { body: commands }
+    );
+    console.log('✅ Slash command /queue registered');
+  } catch (err) {
+    console.error('❌ Failed to register slash commands:', err);
+  }
 });
 
 // Error handling
@@ -45,6 +71,35 @@ client.on('shardError', (error) => console.error('❌ Shard error:', error));
 function getToday() {
   return new Date().toISOString().split('T')[0];
 }
+
+// Handle /queue slash command
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === 'queue') {
+    const coach = interaction.options.getString('coach');
+    const today = getToday();
+
+    try {
+      const records = await base(process.env.AIRTABLE_TABLE_NAME).select({
+        filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, 'YYYY-MM-DD'), '${today}'))`,
+        sort: [{ field: 'Timestamp', direction: 'asc' }]
+      }).firstPage();
+
+      const usersInQueue = [...new Set(records.map(r => r.fields.User))];
+
+      if (usersInQueue.length === 0) {
+        await interaction.reply({ content: `📭 There are no students currently in the queue for ${coach}.`, ephemeral: true });
+      } else {
+        const list = usersInQueue.map((u, i) => `${i + 1}. ${u}`).join('\n');
+        await interaction.reply({ content: `📋 **Current queue for ${coach}:**\n${list}`, ephemeral: true });
+      }
+    } catch (err) {
+      console.error('❌ Error fetching queue:', err);
+      await interaction.reply({ content: `⚠️ There was an error retrieving the queue for ${coach}.`, ephemeral: true });
+    }
+  }
+});
 
 // On message received
 client.on('messageCreate', async (message) => {
@@ -59,7 +114,6 @@ client.on('messageCreate', async (message) => {
     const isWithinHours = currentHour >= user.startHour && currentHour < user.endHour;
 
     if (isMentioned && !isWithinHours) {
-      // Airtable filter to find today's entry
       const filter = `AND({Mentioned} = "${user.name}", {User} = "${message.author.username}", IS_SAME(DATETIME_FORMAT({Timestamp}, 'YYYY-MM-DD'), '${today}'))`;
 
       try {
@@ -90,7 +144,6 @@ client.on('messageCreate', async (message) => {
           console.log(`📥 New queue entry for ${user.name} from ${message.author.username}`);
         }
 
-        // Get queue and calculate position
         const queueRecords = await base(process.env.AIRTABLE_TABLE_NAME).select({
           filterByFormula: `AND({Mentioned} = "${user.name}", IS_SAME(DATETIME_FORMAT({Timestamp}, 'YYYY-MM-DD'), '${today}'))`
         }).firstPage();
@@ -98,7 +151,6 @@ client.on('messageCreate', async (message) => {
         const studentUsernames = [...new Set(queueRecords.map(r => r.fields.User))];
         const position = studentUsernames.indexOf(message.author.username) + 1;
 
-        // Send queue reply
         await message.reply({
           content: `Hey ${message.author.username}, your message has been added to your coach’s queue. You’re number #${position} in line. They’ll get back to you during office hours.`
         });
