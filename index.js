@@ -113,7 +113,9 @@ client.on('messageCreate', async (message) => {
 });
 
 // Login AFTER events are registered
-client.login(process.env.DISCORD_TOKEN);
+client.login(process.env.DISCORD_TOKEN).catch(err => {
+  console.error('❌ Discord login failed:', err);
+});
 
 // Express server for UptimeRobot
 const app = express();
