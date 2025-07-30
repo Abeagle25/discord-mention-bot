@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
 const Airtable = require('airtable');
+const express = require('express');
 
 // Initialize Discord client
 const client = new Client({
@@ -17,16 +18,16 @@ const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process
 // List of users to monitor
 const monitoredUsers = [
   {
-    id: '852485920023117854', // Replace with actual Discord user ID
+    id: '852485920023117854', // Jeika
     name: 'Jeika',
-    startHour: 3,   // 3 AM
-    endHour: 4     // 10 PM
+    startHour: 3,  // 3 AM
+    endHour: 4     // 4 AM (1 hour window for testing)
   },
   {
-    id: '454775533671284746', // Another user ID
+    id: '454775533671284746', // Tugce
     name: 'Tugce',
-    startHour: 3,   // 6 AM
-    endHour: 4     // 6 PM
+    startHour: 3,  // 3 AM
+    endHour: 4     // 4 AM (1 hour window for testing)
   }
 ];
 
@@ -38,24 +39,19 @@ client.on('messageCreate', async (message) => {
   console.log(`[DEBUG] Message received: ${message.content}`);
   if (message.author.bot) return;
 
-  if (message.mentions.users.has('852485920023117854')) {
-    console.log('[DEBUG] Jeika was mentioned!');
-    // your time check + Airtable saving logic here
-  }
-});
-
-
-client.on('messageCreate', async (message) => {
-  if (message.author.bot) return; // Ignore bots
-
   const now = new Date();
   const currentHour = now.getHours();
 
   monitoredUsers.forEach(async (user) => {
     const isMentioned = message.mentions.users.has(user.id);
     const isWithinHours = currentHour >= user.startHour && currentHour < user.endHour;
-  console.log(`[CHECK] Mentioned: ${isMentioned}, Within Hours: ${isWithinHours} (${user.name})`);
-    
+
+    console.log(`[CHECK] Mentioned: ${isMentioned}, Within Hours: ${isWithinHours} (${user.name})`);
+
+    if (user.name === 'Jeika' && isMentioned) {
+      console.log('[DEBUG] Jeika was mentioned!');
+    }
+
     if (isMentioned && isWithinHours) {
       try {
         await base(process.env.AIRTABLE_TABLE_NAME).create({
@@ -73,9 +69,10 @@ client.on('messageCreate', async (message) => {
   });
 });
 
+// Login to Discord
 client.login(process.env.DISCORD_TOKEN);
 
-const express = require('express');
+// Set up Express server (required by Render)
 const app = express();
 const PORT = process.env.PORT || 3000;
 
