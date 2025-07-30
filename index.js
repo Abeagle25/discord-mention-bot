@@ -54,7 +54,8 @@ client.on('messageCreate', async (message) => {
   monitoredUsers.forEach(async (user) => {
     const isMentioned = message.mentions.users.has(user.id);
     const isWithinHours = currentHour >= user.startHour && currentHour < user.endHour;
-
+  console.log(`[CHECK] Mentioned: ${isMentioned}, Within Hours: ${isWithinHours} (${user.name})`);
+    
     if (isMentioned && isWithinHours) {
       try {
         await base(process.env.AIRTABLE_TABLE_NAME).create({
@@ -71,8 +72,6 @@ client.on('messageCreate', async (message) => {
     }
   });
 });
-
-console.log(`[CHECK] Mentioned: ${isMentioned}, Within Hours: ${isWithinHours} (${user.name})`);
 
 client.login(process.env.DISCORD_TOKEN);
 
