@@ -13,10 +13,7 @@ const client = new Client({
   ]
 });
 
-// Login to Discord
-client.login(process.env.DISCORD_TOKEN);
-
-// Initialize Airtable
+// Airtable config
 const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID);
 
 // Users to monitor
@@ -35,12 +32,16 @@ const monitoredUsers = [
   }
 ];
 
-// When bot is ready
+// On bot ready
 client.once('ready', () => {
   console.log(`✅ Bot is online as ${client.user.tag}`);
 });
 
-// Helper function: get today's date as YYYY-MM-DD
+// Error handling
+client.on('error', (error) => console.error('❌ Discord client error:', error));
+client.on('shardError', (error) => console.error('❌ Shard error:', error));
+
+// Helper: today's date
 function getToday() {
   return new Date().toISOString().split('T')[0];
 }
@@ -58,7 +59,7 @@ client.on('messageCreate', async (message) => {
     const isWithinHours = currentHour >= user.startHour && currentHour < user.endHour;
 
     if (isMentioned && !isWithinHours) {
-      // Check if entry already exists
+      // Airtable filter to find today's entry
       const filter = `AND({Mentioned} = "${user.name}", {User} = "${message.author.username}", IS_SAME(DATETIME_FORMAT({Timestamp}, 'YYYY-MM-DD'), '${today}'))`;
 
       try {
@@ -68,7 +69,6 @@ client.on('messageCreate', async (message) => {
         }).firstPage();
 
         if (records.length > 0) {
-          // Update existing record with additional message
           const existing = records[0];
           const currentMessage = existing.fields.Message || '';
           const updatedMessage = `${currentMessage}\n- ${message.content}`;
@@ -79,7 +79,6 @@ client.on('messageCreate', async (message) => {
 
           console.log(`📝 Appended message for ${user.name} from ${message.author.username}`);
         } else {
-          // Create new record
           await base(process.env.AIRTABLE_TABLE_NAME).create({
             Mentioned: user.name,
             User: message.author.username,
@@ -91,16 +90,15 @@ client.on('messageCreate', async (message) => {
           console.log(`📥 New queue entry for ${user.name} from ${message.author.username}`);
         }
 
-        // Get updated queue count
+        // Get queue and calculate position
         const queueRecords = await base(process.env.AIRTABLE_TABLE_NAME).select({
           filterByFormula: `AND({Mentioned} = "${user.name}", IS_SAME(DATETIME_FORMAT({Timestamp}, 'YYYY-MM-DD'), '${today}'))`
         }).firstPage();
 
-        // Get unique users in queue
         const studentUsernames = [...new Set(queueRecords.map(r => r.fields.User))];
         const position = studentUsernames.indexOf(message.author.username) + 1;
 
-        // Send reply
+        // Send queue reply
         await message.reply({
           content: `Hey ${message.author.username}, your message has been added to your coach’s queue. You’re number #${position} in line. They’ll get back to you during office hours.`
         });
@@ -114,7 +112,7 @@ client.on('messageCreate', async (message) => {
   });
 });
 
-// Login to Discord
+// Login AFTER events are registered
 client.login(process.env.DISCORD_TOKEN);
 
 // Express server for UptimeRobot
@@ -122,14 +120,14 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-  res.send('Bot is running!');
+  res.send('✅ Bot is running!');
 });
 
 app.listen(PORT, () => {
   console.log(`🌐 Express server running on port ${PORT}`);
 });
 
-// Ping yourself every 4 minutes (UptimeRobot)
+// UptimeRobot ping every 4 minutes
 setInterval(() => {
   const url = process.env.SELF_PING_URL || `https://${process.env.RENDER_EXTERNAL_URL}`;
   if (url) {
