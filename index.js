@@ -4,7 +4,7 @@ const Airtable = require('airtable');
 const express = require('express');
 const axios = require('axios');
 
-// Initialize Discord client
+// Create Discord client with necessary intents
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -13,10 +13,10 @@ const client = new Client({
   ]
 });
 
-// Airtable config
+// Airtable setup
 const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID);
 
-// Users to monitor
+// Monitored users and their working hours
 const monitoredUsers = [
   {
     id: '852485920023117854', // Jeika
@@ -32,7 +32,7 @@ const monitoredUsers = [
   }
 ];
 
-// Message monitoring logic
+// Discord message event handler
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
@@ -47,6 +47,7 @@ client.on('messageCreate', async (message) => {
 
     if (isMentioned && !isWithinHours) {
       try {
+        // Save to Airtable
         await base(process.env.AIRTABLE_TABLE_NAME).create({
           "Mentioned": user.name,
           "User": message.author.username,
@@ -56,24 +57,25 @@ client.on('messageCreate', async (message) => {
         });
         console.log(`📥 Queued mention for ${user.name} from ${message.author.username}`);
 
+        // Send out-of-office reply
         await message.reply({
-          content: `Heads up! ${user.name} is currently out of office. We'll make sure they see this when they're back. 😊`
+          content: `👋 Heads up! ${user.name} is currently out of office. We'll make sure they see this when they're back.`
         });
         console.log(`💬 Sent OOO reply for ${user.name}`);
       } catch (err) {
-        console.error('❌ Error handling message:', err);
+        console.error('❌ Error saving or replying:', err);
       }
     }
   }
 });
 
-// Discord Ready
+// When bot is ready
 client.once('ready', () => {
   console.log(`✅ Discord bot logged in as ${client.user.tag}`);
 
   // Start Express server after bot is ready
   const app = express();
-  const PORT = process.env.PORT || 3000;
+  const PORT = process.env.PORT || 10000;
 
   app.get('/', (req, res) => {
     res.send('Bot is running!');
@@ -81,9 +83,10 @@ client.once('ready', () => {
 
   app.listen(PORT, () => {
     console.log(`🌐 Express server running on port ${PORT}`);
+    console.log(`🚀 App accessible at https://${process.env.RENDER_EXTERNAL_URL || 'your-render-url'}`);
   });
 
-  // Uptime ping every 4 minutes
+  // Keep alive ping every 4 minutes
   setInterval(() => {
     const url = process.env.SELF_PING_URL || `https://${process.env.RENDER_EXTERNAL_URL}`;
     if (url) {
@@ -96,8 +99,8 @@ client.once('ready', () => {
   }, 240000); // 4 minutes
 });
 
-// Login with error handling
+// Login to Discord
 client.login(process.env.DISCORD_TOKEN).catch(err => {
   console.error('❌ Failed to login to Discord:', err);
-  process.exit(1); // Stop app if login fails
+  process.exit(1);
 });
