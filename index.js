@@ -1,10 +1,27 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
-const Airtable = require('airtable');
 const express = require('express');
+const Airtable = require('airtable');
 const axios = require('axios');
 
-// Create Discord client with necessary intents
+// =======================
+// CONFIG
+// =======================
+
+const PORT = process.env.PORT || 10000;
+const WORK_START_HOUR = 3;  // 3 AM UTC
+const WORK_END_HOUR = 10;   // 10 AM UTC
+
+const MENTIONED_USERS = ['Jeika', 'Tugce'];
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
+const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
+
+// =======================
+// INIT
+// =======================
+
+const app = express();
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -13,94 +30,84 @@ const client = new Client({
   ]
 });
 
-// Airtable setup
-const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID);
+const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
 
-// Monitored users and their working hours
-const monitoredUsers = [
-  {
-    id: '852485920023117854', // Jeika
-    name: 'Jeika',
-    startHour: 3,
-    endHour: 4
-  },
-  {
-    id: '454775533671284746', // Tugce
-    name: 'Tugce',
-    startHour: 3,
-    endHour: 4
-  }
-];
+// =======================
+// UTILS
+// =======================
 
-// Discord message event handler
+function isWithinWorkingHours() {
+  const now = new Date();
+  const hour = now.getUTCHours();
+  return hour >= WORK_START_HOUR && hour < WORK_END_HOUR;
+}
+
+function wasMentioned(message, user) {
+  return message.mentions.users.some(mentioned => mentioned.username === user);
+}
+
+// =======================
+// DISCORD EVENTS
+// =======================
+
+client.on('ready', () => {
+  console.log(`✅ Bot is online as ${client.user.tag}`);
+});
+
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
-  const now = new Date();
-  const currentHour = now.getHours();
+  MENTIONED_USERS.forEach(async (user) => {
+    const isMentioned = wasMentioned(message, user);
+    const isWithinHours = isWithinWorkingHours();
 
-  for (const user of monitoredUsers) {
-    const isMentioned = message.mentions.users.has(user.id);
-    const isWithinHours = currentHour >= user.startHour && currentHour < user.endHour;
-
-    console.log(`[CHECK] Mentioned: ${isMentioned}, Within Hours: ${isWithinHours} (${user.name})`);
+    console.log(`[CHECK] Mentioned: ${isMentioned}, Within Hours: ${isWithinHours} (${user})`);
 
     if (isMentioned && !isWithinHours) {
-      try {
-        // Save to Airtable
-        await base(process.env.AIRTABLE_TABLE_NAME).create({
-          "Mentioned": user.name,
-          "User": message.author.username,
-          "Message": message.content,
-          "Timestamp": new Date().toISOString(),
-          "Channel": message.channel.name || "DM or Unknown"
-        });
-        console.log(`📥 Queued mention for ${user.name} from ${message.author.username}`);
+      // Save to Airtable
+      await base('Mentions').create([
+        {
+          fields: {
+            Mentioned: user,
+            User: message.author.username,
+            Message: message.content,
+            Timestamp: new Date().toISOString(),
+            Channel: message.channel.name
+          }
+        }
+      ]);
 
-        // Send out-of-office reply
-        await message.reply({
-          content: `👋 Heads up! ${user.name} is currently out of office. We'll make sure they see this when they're back.`
-        });
-        console.log(`💬 Sent OOO reply for ${user.name}`);
-      } catch (err) {
-        console.error('❌ Error saving or replying:', err);
-      }
+      console.log(`📥 Queued mention for ${user} from ${message.author.username}.`);
+
+      // Reply to the user
+      await message.reply(`Hi! @${user} is currently out of office. We'll make sure they see this message soon!`);
     }
-  }
-});
-
-// When bot is ready
-client.once('ready', () => {
-  console.log(`✅ Discord bot logged in as ${client.user.tag}`);
-
-  // Start Express server after bot is ready
-  const app = express();
-  const PORT = process.env.PORT || 10000;
-
-  app.get('/', (req, res) => {
-    res.send('Bot is running!');
   });
+});
 
-  app.listen(PORT, () => {
-    console.log(`🌐 Express server running on port ${PORT}`);
-    console.log(`🚀 App accessible at https://${process.env.RENDER_EXTERNAL_URL || 'your-render-url'}`);
+// =======================
+// EXPRESS + SELF-PING
+// =======================
+
+app.get('/', (req, res) => {
+  res.send('Bot is alive!');
+});
+
+app.listen(PORT, () => {
+  console.log(`🌐 Express server running on port ${PORT}`);
+});
+
+// Self-ping to keep alive (UptimeRobot)
+setInterval(() => {
+  axios.get(`https://discord-mention-bot.onrender.com`).then(() => {
+    console.log('🔁 Self-ping successful');
+  }).catch(err => {
+    console.error('⚠️ Self-ping failed:', err.message);
   });
+}, 5 * 60 * 1000); // every 5 minutes
 
-  // Keep alive ping every 4 minutes
-  setInterval(() => {
-    const url = process.env.SELF_PING_URL || `https://${process.env.RENDER_EXTERNAL_URL}`;
-    if (url) {
-      axios.get(url)
-        .then(() => console.log('🔁 Self-ping successful'))
-        .catch((err) => console.error('❌ Self-ping failed:', err.message));
-    } else {
-      console.warn('⚠️ SELF_PING_URL not set in .env');
-    }
-  }, 240000); // 4 minutes
-});
+// =======================
+// START BOT
+// =======================
 
-// Login to Discord
-client.login(process.env.DISCORD_TOKEN).catch(err => {
-  console.error('❌ Failed to login to Discord:', err);
-  process.exit(1);
-});
+client.login(DISCORD_TOKEN);
