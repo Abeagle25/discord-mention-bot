@@ -1,121 +1,139 @@
-// index.js
-
-const { Client, GatewayIntentBits } = require('discord.js');
-const express = require('express');
-const Airtable = require('airtable');
-const cron = require('node-cron');
 require('dotenv').config();
+const { Client, GatewayIntentBits } = require('discord.js');
+const Airtable = require('airtable');
+const express = require('express');
+const axios = require('axios');
 
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
-const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
-const PORT = process.env.PORT || 3000;
-const OUT_OF_OFFICE_START = 3; // 3 AM
-const OUT_OF_OFFICE_END = 22; // 10 PM
-const CHECK_CHANNEL_ID = process.env.CHECK_CHANNEL_ID;
-
-const usersToMonitor = [
-  { id: '1234567890', name: 'Jeika' },
-  { id: '0987654321', name: 'Tugce' }
-];
-
-const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
-
-// Util to check current hour in ET
-const isWithinWorkingHours = () => {
-  const now = new Date();
-  const hour = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false });
-  return hour >= OUT_OF_OFFICE_START && hour < OUT_OF_OFFICE_END;
-};
-
-client.once('ready', () => {
-  console.log(`✅ Discord bot logged in as ${client.user.tag}`);
+// Initialize Discord client
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
 });
 
+// Initialize Airtable
+const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID);
+
+// Users to monitor
+const monitoredUsers = [
+  {
+    id: '852485920023117854', // Jeika
+    name: 'Jeika',
+    startHour: 3,
+    endHour: 4
+  },
+  {
+    id: '454775533671284746', // Tugce
+    name: 'Tugce',
+    startHour: 3,
+    endHour: 4
+  }
+];
+
+// When bot is ready
+client.once('ready', () => {
+  console.log(`✅ Bot is online as ${client.user.tag}`);
+});
+
+// Helper function: get today's date as YYYY-MM-DD
+function getToday() {
+  return new Date().toISOString().split('T')[0];
+}
+
+// On message received
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
-  for (const user of usersToMonitor) {
-    if (message.mentions.users.has(user.id)) {
-      const withinHours = isWithinWorkingHours();
-      console.log(`[CHECK] Mentioned: true, Within Hours: ${withinHours} (${user.name})`);
+  const now = new Date();
+  const currentHour = now.getHours();
+  const today = getToday();
 
-      if (!withinHours) {
-        // Save to Airtable
-        base('Queue').create([
-          {
-            fields: {
-              Mentioned: user.name,
-              Student: message.author.username,
-              Message: message.content,
-              Timestamp: new Date().toISOString()
-            }
-          }
-        ], function (err) {
-          if (err) {
-            console.error('❌ Airtable error:', err);
-            return;
-          }
-          console.log(`📥 Queued mention for ${user.name} from ${message.author.username}`);
+  monitoredUsers.forEach(async (user) => {
+    const isMentioned = message.mentions.users.has(user.id);
+    const isWithinHours = currentHour >= user.startHour && currentHour < user.endHour;
+
+    if (isMentioned && !isWithinHours) {
+      // Check if entry already exists
+      const filter = `AND({Mentioned} = "${user.name}", {User} = "${message.author.username}", IS_SAME(DATETIME_FORMAT({Timestamp}, 'YYYY-MM-DD'), '${today}'))`;
+
+      try {
+        const records = await base(process.env.AIRTABLE_TABLE_NAME).select({
+          filterByFormula: filter,
+          sort: [{ field: 'Timestamp', direction: 'asc' }]
+        }).firstPage();
+
+        if (records.length > 0) {
+          // Update existing record with additional message
+          const existing = records[0];
+          const currentMessage = existing.fields.Message || '';
+          const updatedMessage = `${currentMessage}\n- ${message.content}`;
+
+          await base(process.env.AIRTABLE_TABLE_NAME).update(existing.id, {
+            Message: updatedMessage
+          });
+
+          console.log(`📝 Appended message for ${user.name} from ${message.author.username}`);
+        } else {
+          // Create new record
+          await base(process.env.AIRTABLE_TABLE_NAME).create({
+            Mentioned: user.name,
+            User: message.author.username,
+            Message: message.content,
+            Timestamp: new Date().toISOString(),
+            Channel: message.channel.name || "DM or Unknown"
+          });
+
+          console.log(`📥 New queue entry for ${user.name} from ${message.author.username}`);
+        }
+
+        // Get updated queue count
+        const queueRecords = await base(process.env.AIRTABLE_TABLE_NAME).select({
+          filterByFormula: `AND({Mentioned} = "${user.name}", IS_SAME(DATETIME_FORMAT({Timestamp}, 'YYYY-MM-DD'), '${today}'))`
+        }).firstPage();
+
+        // Get unique users in queue
+        const studentUsernames = [...new Set(queueRecords.map(r => r.fields.User))];
+        const position = studentUsernames.indexOf(message.author.username) + 1;
+
+        // Send reply
+        await message.reply({
+          content: `Hey ${message.author.username}, your message has been added to your coach’s queue. You’re number #${position} in line. They’ll get back to you during office hours.`
         });
 
-        // Count same-day queued mentions
-        const today = new Date().toISOString().split("T")[0];
-        base("Queue").select({
-          filterByFormula: `AND({Mentioned} = "${user.name}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`
-        }).firstPage((err, records) => {
-          if (err) {
-            console.error("❌ Airtable count error:", err);
-            return;
-          }
+        console.log(`💬 Replied with position #${position} for ${message.author.username}`);
 
-          const position = records.length;
-          message.reply(
-            `Hi ${message.author}, ${user.name} is currently offline. I've queued your message. You're #${position} in line. 👀`
-          );
-        });
+      } catch (err) {
+        console.error('❌ Airtable error:', err);
       }
     }
-  }
+  });
 });
 
-// Daily summary cron job (runs at 10 PM ET)
-cron.schedule('0 22 * * *', async () => {
-  const today = new Date().toISOString().split("T")[0];
-  const summaryMap = {};
+// Login to Discord
+client.login(process.env.DISCORD_TOKEN);
 
-  for (const user of usersToMonitor) {
-    base("Queue").select({
-      filterByFormula: `AND({Mentioned} = "${user.name}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`
-    }).firstPage((err, records) => {
-      if (err) {
-        console.error("❌ Daily summary error:", err);
-        return;
-      }
-
-      if (records.length > 0) {
-        const mentions = records.map(r => `• ${r.get("Student")}: ${r.get("Message")}`).join("\n");
-        const summary = `**Daily Mention Summary for ${user.name}**\n${mentions}`;
-
-        client.channels.fetch(CHECK_CHANNEL_ID).then(channel => {
-          channel.send(summary);
-        });
-      }
-    });
-  }
-}, {
-  timezone: "America/New_York"
-});
-
-// Express web server to keep Render alive
+// Express server for UptimeRobot
 const app = express();
+const PORT = process.env.PORT || 3000;
+
 app.get('/', (req, res) => {
   res.send('Bot is running!');
 });
+
 app.listen(PORT, () => {
   console.log(`🌐 Express server running on port ${PORT}`);
 });
 
-// Login
-client.login(DISCORD_TOKEN);
+// Ping yourself every 4 minutes (UptimeRobot)
+setInterval(() => {
+  const url = process.env.SELF_PING_URL || `https://${process.env.RENDER_EXTERNAL_URL}`;
+  if (url) {
+    axios.get(url)
+      .then(() => console.log('🔁 Self-ping successful'))
+      .catch((err) => console.error('❌ Self-ping failed:', err.message));
+  } else {
+    console.warn('⚠️ SELF_PING_URL not set in .env');
+  }
+}, 240000);
