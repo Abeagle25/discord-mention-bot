@@ -20,24 +20,25 @@ const monitoredUsers = [
   {
     id: '852485920023117854', // Jeika
     name: 'Jeika',
-    startHour: 3,  // 3 AM
-    endHour: 4     // 4 AM (1 hour window for testing)
+    startHour: 3, // 3 AM
+    endHour: 4    // 4 AM (just 1 hour for testing)
   },
   {
     id: '454775533671284746', // Tugce
     name: 'Tugce',
-    startHour: 3,  // 3 AM
-    endHour: 4     // 4 AM (1 hour window for testing)
+    startHour: 3,
+    endHour: 4
   }
 ];
 
+// Bot is ready
 client.once('ready', () => {
   console.log(`✅ Bot is online as ${client.user.tag}`);
 });
 
+// Message handling
 client.on('messageCreate', async (message) => {
-  console.log(`[DEBUG] Message received: ${message.content}`);
-  if (message.author.bot) return;
+  if (message.author.bot) return; // Ignore bot messages
 
   const now = new Date();
   const currentHour = now.getHours();
@@ -48,11 +49,7 @@ client.on('messageCreate', async (message) => {
 
     console.log(`[CHECK] Mentioned: ${isMentioned}, Within Hours: ${isWithinHours} (${user.name})`);
 
-    if (user.name === 'Jeika' && isMentioned) {
-      console.log('[DEBUG] Jeika was mentioned!');
-    }
-
-    if (isMentioned && isWithinHours) {
+    if (isMentioned && !isWithinHours) {
       try {
         await base(process.env.AIRTABLE_TABLE_NAME).create({
           "Mentioned": user.name,
@@ -69,10 +66,10 @@ client.on('messageCreate', async (message) => {
   });
 });
 
-// Login to Discord
+// Login the bot
 client.login(process.env.DISCORD_TOKEN);
 
-// Set up Express server (required by Render)
+// Optional Express server for uptime checks
 const app = express();
 const PORT = process.env.PORT || 3000;
 
