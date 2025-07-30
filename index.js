@@ -2,6 +2,7 @@ require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
 const Airtable = require('airtable');
 const express = require('express');
+const axios = require('axios');
 
 // Initialize Discord client
 const client = new Client({
@@ -31,12 +32,12 @@ const monitoredUsers = [
   }
 ];
 
-// Bot is ready
+// When bot is ready
 client.once('ready', () => {
   console.log(`✅ Bot is online as ${client.user.tag}`);
 });
 
-// On message
+// On message received
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
@@ -57,7 +58,7 @@ client.on('messageCreate', async (message) => {
           "User": message.author.username,
           "Message": message.content,
           "Timestamp": new Date().toISOString(),
-          "Channel": message.channel.name
+          "Channel": message.channel.name || "DM or Unknown"
         });
         console.log(`📥 Queued mention for ${user.name} from ${message.author.username}`);
       } catch (err) {
@@ -77,10 +78,10 @@ client.on('messageCreate', async (message) => {
   });
 });
 
-// Login
+// Login to Discord
 client.login(process.env.DISCORD_TOKEN);
 
-// Express server for uptime
+// Set up Express server for uptime
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -91,3 +92,15 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
   console.log(`🌐 Express server running on port ${PORT}`);
 });
+
+// Ping yourself every 4 minutes (UptimeRobot friendly)
+setInterval(() => {
+  const url = process.env.SELF_PING_URL || `https://${process.env.RENDER_EXTERNAL_URL}`;
+  if (url) {
+    axios.get(url)
+      .then(() => console.log('🔁 Self-ping successful'))
+      .catch((err) => console.error('❌ Self-ping failed:', err.message));
+  } else {
+    console.warn('⚠️ SELF_PING_URL not set in .env');
+  }
+}, 240000); // 4 minutes
