@@ -79,7 +79,9 @@ client.on('messageCreate', async (message) => {
 });
 
 // Login to Discord
-client.login(process.env.DISCORD_TOKEN);
+client.login(process.env.DISCORD_TOKEN).catch(err => {
+  console.error('❌ Discord login failed:', err);
+});
 
 // Set up Express server for uptime
 const app = express();
