@@ -1,155 +1,121 @@
-require('dotenv').config();
-const { Client, GatewayIntentBits, ChannelType } = require('discord.js');
-const Airtable = require('airtable');
+// index.js
+
+const { Client, GatewayIntentBits } = require('discord.js');
 const express = require('express');
-const axios = require('axios');
+const Airtable = require('airtable');
+const cron = require('node-cron');
+require('dotenv').config();
 
-// Discord client
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
-});
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
+const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
+const PORT = process.env.PORT || 3000;
+const OUT_OF_OFFICE_START = 3; // 3 AM
+const OUT_OF_OFFICE_END = 22; // 10 PM
+const CHECK_CHANNEL_ID = process.env.CHECK_CHANNEL_ID;
 
-// Airtable setup
-const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID);
-
-// Monitored users
-const monitoredUsers = [
-  {
-    id: '852485920023117854', // Jeika
-    name: 'Jeika',
-    startHour: 3,
-    endHour: 22
-  },
-  {
-    id: '454775533671284746', // Tugce
-    name: 'Tugce',
-    startHour: 3,
-    endHour: 22
-  }
+const usersToMonitor = [
+  { id: '1234567890', name: 'Jeika' },
+  { id: '0987654321', name: 'Tugce' }
 ];
 
-// When bot is ready
+const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
+
+// Util to check current hour in ET
+const isWithinWorkingHours = () => {
+  const now = new Date();
+  const hour = now.toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false });
+  return hour >= OUT_OF_OFFICE_START && hour < OUT_OF_OFFICE_END;
+};
+
 client.once('ready', () => {
-  console.log(`✅ Bot is online as ${client.user.tag}`);
-  startDailySummaryJob(); // Daily summary cron
+  console.log(`✅ Discord bot logged in as ${client.user.tag}`);
 });
 
-// On message
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
-  const now = new Date();
-  const currentHour = now.getHours();
-  const today = now.toISOString().split('T')[0]; // yyyy-mm-dd
+  for (const user of usersToMonitor) {
+    if (message.mentions.users.has(user.id)) {
+      const withinHours = isWithinWorkingHours();
+      console.log(`[CHECK] Mentioned: true, Within Hours: ${withinHours} (${user.name})`);
 
-  monitoredUsers.forEach(async (user) => {
-    const isMentioned = message.mentions.users.has(user.id);
-    const isWithinHours = currentHour >= user.startHour && currentHour < user.endHour;
-
-    console.log(`[CHECK] Mentioned: ${isMentioned}, Within Hours: ${isWithinHours} (${user.name})`);
-
-    if (isMentioned && !isWithinHours) {
-      try {
-        // Check existing same-day entry
-        const records = await base(process.env.AIRTABLE_TABLE_NAME)
-          .select({
-            filterByFormula: `AND({Mentioned} = "${user.name}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today"}"))`
-          })
-          .all();
-
-        let queuePosition;
-        if (records.length > 0) {
-          // Append message to existing record
-          const record = records[0];
-          const existingMessages = record.fields.Messages || '';
-          const newMessages = `${existingMessages}\n[${message.author.username}] ${message.content}`;
-          await base(process.env.AIRTABLE_TABLE_NAME).update(record.id, {
-            "Messages": newMessages
-          });
-          queuePosition = 'Already queued today.';
-        } else {
-          // New entry
-          await base(process.env.AIRTABLE_TABLE_NAME).create({
-            "Mentioned": user.name,
-            "User": message.author.username,
-            "Messages": `[${message.author.username}] ${message.content}`,
-            "Timestamp": now.toISOString(),
-            "Channel": message.channel.name || "DM or Unknown"
-          });
-          queuePosition = 'You’re the first to mention them today!';
-        }
-
-        console.log(`📥 Queued mention for ${user.name} from ${message.author.username}`);
-
-        await message.reply({
-          content: `Heads up! ${user.name} is currently out of office.\n${queuePosition} We'll make sure they see this when they're back. 😊`
+      if (!withinHours) {
+        // Save to Airtable
+        base('Queue').create([
+          {
+            fields: {
+              Mentioned: user.name,
+              Student: message.author.username,
+              Message: message.content,
+              Timestamp: new Date().toISOString()
+            }
+          }
+        ], function (err) {
+          if (err) {
+            console.error('❌ Airtable error:', err);
+            return;
+          }
+          console.log(`📥 Queued mention for ${user.name} from ${message.author.username}`);
         });
-        console.log(`💬 Sent OOO reply for ${user.name}`);
-      } catch (err) {
-        console.error('❌ Airtable error or message failure:', err);
+
+        // Count same-day queued mentions
+        const today = new Date().toISOString().split("T")[0];
+        base("Queue").select({
+          filterByFormula: `AND({Mentioned} = "${user.name}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`
+        }).firstPage((err, records) => {
+          if (err) {
+            console.error("❌ Airtable count error:", err);
+            return;
+          }
+
+          const position = records.length;
+          message.reply(
+            `Hi ${message.author}, ${user.name} is currently offline. I've queued your message. You're #${position} in line. 👀`
+          );
+        });
       }
     }
-  });
+  }
 });
 
-// Daily summary job
-function startDailySummaryJob() {
-  const now = new Date();
-  const millisTill10PM = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 22, 0, 0) - now;
-  setTimeout(() => {
-    sendDailySummary();
-    setInterval(sendDailySummary, 24 * 60 * 60 * 1000); // Every 24 hours
-  }, millisTill10PM);
-}
+// Daily summary cron job (runs at 10 PM ET)
+cron.schedule('0 22 * * *', async () => {
+  const today = new Date().toISOString().split("T")[0];
+  const summaryMap = {};
 
-async function sendDailySummary() {
-  const today = new Date().toISOString().split('T')[0];
-  const summaryChannel = await client.channels.fetch(process.env.SUMMARY_CHANNEL_ID);
+  for (const user of usersToMonitor) {
+    base("Queue").select({
+      filterByFormula: `AND({Mentioned} = "${user.name}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`
+    }).firstPage((err, records) => {
+      if (err) {
+        console.error("❌ Daily summary error:", err);
+        return;
+      }
 
-  if (!summaryChannel || summaryChannel.type !== ChannelType.GuildText) {
-    console.warn('⚠️ Invalid summary channel ID or type.');
-    return;
+      if (records.length > 0) {
+        const mentions = records.map(r => `• ${r.get("Student")}: ${r.get("Message")}`).join("\n");
+        const summary = `**Daily Mention Summary for ${user.name}**\n${mentions}`;
+
+        client.channels.fetch(CHECK_CHANNEL_ID).then(channel => {
+          channel.send(summary);
+        });
+      }
+    });
   }
+}, {
+  timezone: "America/New_York"
+});
 
-  let summary = `📋 **Daily Mention Summary** (${today})\n`;
-
-  for (const user of monitoredUsers) {
-    const records = await base(process.env.AIRTABLE_TABLE_NAME)
-      .select({
-        filterByFormula: `AND({Mentioned} = "${user.name}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`
-      })
-      .all();
-
-    if (records.length > 0) {
-      const entry = records[0].fields;
-      summary += `\n**${user.name}** was mentioned by **${entry.User}**:\n${entry.Messages}\n`;
-    } else {
-      summary += `\n**${user.name}** had no mentions today.\n`;
-    }
-  }
-
-  await summaryChannel.send(summary);
-  console.log('📨 Daily summary sent.');
-}
-
-// Express for uptime
+// Express web server to keep Render alive
 const app = express();
-const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Bot is running!'));
-app.listen(PORT, () => console.log(`🌐 Server on port ${PORT}`));
+app.get('/', (req, res) => {
+  res.send('Bot is running!');
+});
+app.listen(PORT, () => {
+  console.log(`🌐 Express server running on port ${PORT}`);
+});
 
-// Self-ping every 4 minutes
-setInterval(() => {
-  const url = process.env.SELF_PING_URL || `https://${process.env.RENDER_EXTERNAL_URL}`;
-  if (url) {
-    axios.get(url)
-      .then(() => console.log('🔁 Self-ping successful'))
-      .catch((err) => console.error('❌ Self-ping failed:', err.message));
-  } else {
-    console.warn('⚠️ SELF_PING_URL not set');
-  }
-}, 240000);
+// Login
+client.login(DISCORD_TOKEN);
