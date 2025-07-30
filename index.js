@@ -112,6 +112,7 @@ client.on('messageCreate', async (message) => {
   });
 });
 
+console.log(`Using DISCORD_TOKEN: ${process.env.DISCORD_TOKEN ? '✅ Set' : '❌ Not Set'}`);
 // Login AFTER events are registered
 client.login(process.env.DISCORD_TOKEN).catch(err => {
   console.error('❌ Discord login failed:', err);
