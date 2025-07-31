@@ -25,6 +25,9 @@ const SUMMARY_CHANNEL_ID = process.env.SUMMARY_CHANNEL_ID;
 const PORT = process.env.PORT || 3000;
 const SELF_PING_URL = process.env.SELF_PING_URL || `https://${process.env.RENDER_EXTERNAL_URL || ''}`;
 
+// Required role ID (Team Ambitious Labs)
+const REQUIRED_ROLE_ID = '1176961256029171773';
+
 // ---- Debug / sanity ----
 console.log(`Using DISCORD_TOKEN: ${DISCORD_TOKEN ? '✅ Set' : '❌ Not Set'}`);
 console.log(`Using CLIENT_ID: ${CLIENT_ID ? '✅ Set' : '❌ Not Set'}`);
@@ -42,21 +45,25 @@ if (AIRTABLE_API_KEY && AIRTABLE_BASE_ID && AIRTABLE_TABLE_NAME) {
 }
 
 // ---- Coaches config ----
-// Active hours per coach (24h EST)
+// Active hours per coach (24h EST, including minutes)
 const coachHours = {
-  Jeika: { start: 15, end: 16 },
-  Tugce: { start: 15, end: 16 },
+  Jeika: { start: { hour: 10, minute: 0 }, end: { hour: 15, minute: 0 } }, // 10AM–3PM EST
+  Tugce: { start: { hour: 8, minute: 0 }, end: { hour: 18, minute: 0 } }, // 8AM–6PM EST
+  Sandro: { start: { hour: 6, minute: 0 }, end: { hour: 16, minute: 0 } }, // 6AM–4PM EST
+  Alim: { start: { hour: 8, minute: 30 }, end: { hour: 19, minute: 0 } }, // 8:30AM–7PM EST
 };
-// Discord IDs used for tagging and permission checks
+// Discord IDs for tagging / authorization
 const coachDiscordIds = {
   Jeika: '852485920023117854',
   Tugce: '454775533671284746',
+  Sandro: '814382156633079828',
+  Alim: '1013886202266521751',
 };
 
 // ---- Reminder tracking ----
 const reminderSent = {}; // { coachName: 'YYYY-MM-DD' }
 
-// ---- Helper: EST time handling ----
+// ---- Time helpers (EST) ----
 function getESTNow() {
   const now = new Date();
   const estString = now.toLocaleString('en-US', { timeZone: 'America/New_York' });
@@ -77,6 +84,16 @@ function formatEST(iso) {
   } catch {
     return iso;
   }
+}
+function toMinutes(t) {
+  return t.hour * 60 + (t.minute || 0);
+}
+function isWithinCoachHours(coach, estDate) {
+  const nowMin = estDate.getHours() * 60 + estDate.getMinutes();
+  const { start, end } = coachHours[coach];
+  const startMin = toMinutes(start);
+  const endMin = toMinutes(end);
+  return nowMin >= startMin && nowMin < endMin;
 }
 
 // ---- Express for health / manual summary ----
@@ -169,11 +186,13 @@ const queueCommand = new SlashCommandBuilder()
   .addStringOption((opt) =>
     opt
       .setName('coach')
-      .setDescription('Coach name (Jeika or Tugce)')
+      .setDescription('Coach name')
       .setRequired(true)
       .addChoices(
         { name: 'Jeika', value: 'Jeika' },
-        { name: 'Tugce', value: 'Tugce' }
+        { name: 'Tugce', value: 'Tugce' },
+        { name: 'Sandro', value: 'Sandro' },
+        { name: 'Alim', value: 'Alim' }
       )
   );
 
@@ -183,18 +202,17 @@ const clearEntryCommand = new SlashCommandBuilder()
   .addStringOption((opt) =>
     opt
       .setName('coach')
-      .setDescription('Coach name (Jeika or Tugce)')
+      .setDescription('Coach name')
       .setRequired(true)
       .addChoices(
         { name: 'Jeika', value: 'Jeika' },
-        { name: 'Tugce', value: 'Tugce' }
+        { name: 'Tugce', value: 'Tugce' },
+        { name: 'Sandro', value: 'Sandro' },
+        { name: 'Alim', value: 'Alim' }
       )
   )
   .addStringOption((opt) =>
-    opt
-      .setName('student')
-      .setDescription('Student username to remove from queue')
-      .setRequired(true)
+    opt.setName('student').setDescription('Student username to remove from queue').setRequired(true)
   );
 
 const clearAllCommand = new SlashCommandBuilder()
@@ -203,11 +221,13 @@ const clearAllCommand = new SlashCommandBuilder()
   .addStringOption((opt) =>
     opt
       .setName('coach')
-      .setDescription('Coach name (Jeika or Tugce)')
+      .setDescription('Coach name')
       .setRequired(true)
       .addChoices(
         { name: 'Jeika', value: 'Jeika' },
-        { name: 'Tugce', value: 'Tugce' }
+        { name: 'Tugce', value: 'Tugce' },
+        { name: 'Sandro', value: 'Sandro' },
+        { name: 'Alim', value: 'Alim' }
       )
   )
   .addBooleanOption((opt) =>
@@ -218,6 +238,13 @@ const clearAllCommand = new SlashCommandBuilder()
   );
 
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+
+// ---- Role check helper ----
+function memberHasRequiredRole(interaction) {
+  const member = interaction.member;
+  if (!member || !member.roles) return false;
+  return member.roles.cache ? member.roles.cache.has(REQUIRED_ROLE_ID) : false;
+}
 
 // ---- Ready & register commands ----
 client.once(Events.ClientReady, async () => {
@@ -233,9 +260,32 @@ client.once(Events.ClientReady, async () => {
   }
 });
 
+// ---- Safe reply utilities ----
+async function safeReply(interaction, options) {
+  try {
+    if (interaction.replied || interaction.deferred) {
+      await interaction.editReply(options);
+    } else {
+      await interaction.reply(options);
+    }
+  } catch (e) {
+    // swallow if interaction expired/unknown
+    console.warn('⚠️ safeReply failure:', e.message);
+  }
+}
+
 // ---- Interaction handler ----
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
+
+  // role gating
+  if (!memberHasRequiredRole(interaction)) {
+    await safeReply(interaction, {
+      content: `❌ You need the Team Ambitious Labs role to use this command.`,
+      flags: 64,
+    });
+    return;
+  }
 
   const today = todayDateEST();
 
@@ -243,10 +293,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const coach = interaction.options.getString('coach');
 
     if (!queueTable) {
-      return interaction.reply({
+      await safeReply(interaction, {
         content: '⚠️ Queue table not configured properly.',
         flags: 64,
       });
+      return;
     }
 
     try {
@@ -260,7 +311,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .all();
 
       if (records.length === 0) {
-        await interaction.editReply({
+        await safeReply(interaction, {
           content: `📭 No one is currently in the queue for **${coach}** today.`,
         });
         return;
@@ -295,14 +346,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         idx += 1;
       }
 
-      await interaction.editReply(reply);
+      await safeReply(interaction, { content: reply });
     } catch (err) {
       console.error('❌ Error fetching queue:', err);
-      if (interaction.replied || interaction.deferred) {
-        await interaction.editReply({ content: 'There was an error fetching the queue.' });
-      } else {
-        await interaction.reply({ content: 'There was an error fetching the queue.', flags: 64 });
-      }
+      await safeReply(interaction, {
+        content: 'There was an error fetching the queue.',
+        flags: 64,
+      });
     }
   } else if (interaction.commandName === 'clearentry') {
     const coach = interaction.options.getString('coach');
@@ -310,17 +360,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const callerId = interaction.user.id;
 
     if (coachDiscordIds[coach] !== callerId) {
-      return interaction.reply({
+      await safeReply(interaction, {
         content: `❌ You are not authorized to clear entries for ${coach}.`,
         flags: 64,
       });
+      return;
     }
 
     if (!queueTable) {
-      return interaction.reply({
+      await safeReply(interaction, {
         content: '⚠️ Queue table not configured properly.',
         flags: 64,
       });
+      return;
     }
 
     try {
@@ -333,7 +385,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .all();
 
       if (records.length === 0) {
-        await interaction.editReply({
+        await safeReply(interaction, {
           content: `ℹ️ No queue entries found for **${student}** under **${coach}** today.`,
         });
         return;
@@ -344,16 +396,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await queueTable.destroy(ids.slice(i, i + 10));
       }
 
-      await interaction.editReply({
+      await safeReply(interaction, {
         content: `🗑️ Cleared ${records.length} entr${records.length === 1 ? 'y' : 'ies'} for **${student}** under **${coach}** today.`,
       });
     } catch (err) {
       console.error('❌ Error clearing entry:', err);
-      if (interaction.replied || interaction.deferred) {
-        await interaction.editReply({ content: 'Failed to clear the queue entry.' });
-      } else {
-        await interaction.reply({ content: 'Failed to clear the queue entry.', flags: 64 });
-      }
+      await safeReply(interaction, {
+        content: 'Failed to clear the queue entry.',
+        flags: 64,
+      });
     }
   } else if (interaction.commandName === 'clearall') {
     const coach = interaction.options.getString('coach');
@@ -361,14 +412,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const callerId = interaction.user.id;
 
     if (coachDiscordIds[coach] !== callerId) {
-      return interaction.reply({
+      await safeReply(interaction, {
         content: `❌ You are not authorized to clear entries for ${coach}.`,
         flags: 64,
       });
+      return;
     }
 
     if (!confirm) {
-      return interaction.reply({
+      await safeReply(interaction, {
         content: `⚠️ This will remove *all* queue entries for **${coach}** (including prior days). If you’re sure, re-run with \`confirm: true\`.`,
         flags: 64,
       });
@@ -376,10 +428,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (!queueTable) {
-      return interaction.reply({
+      await safeReply(interaction, {
         content: '⚠️ Queue table not configured properly.',
         flags: 64,
       });
+      return;
     }
 
     try {
@@ -393,7 +446,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .all();
 
       if (records.length === 0) {
-        await interaction.editReply({
+        await safeReply(interaction, {
           content: `ℹ️ No queue entries to clear for **${coach}**.`,
         });
         return;
@@ -404,21 +457,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await queueTable.destroy(ids.slice(i, i + 10));
       }
 
-      await interaction.editReply({
+      await safeReply(interaction, {
         content: `🗑️ Cleared all (${records.length}) queue entr${records.length === 1 ? 'y' : 'ies'} for **${coach}** (all dates).`,
       });
     } catch (err) {
       console.error('❌ Error clearing all entries:', err);
-      if (interaction.replied || interaction.deferred) {
-        await interaction.editReply({ content: 'Failed to clear the queue.' });
-      } else {
-        await interaction.reply({ content: 'Failed to clear the queue.', flags: 64 });
-      }
+      await safeReply(interaction, {
+        content: 'Failed to clear the queue.',
+        flags: 64,
+      });
     }
   }
 });
 
-// ---- Mention / queue logic (with added office-hour log) ----
+// ---- Mention / queue logic (with office-hour log and EST handling) ----
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
 
@@ -431,11 +483,15 @@ client.on(Events.MessageCreate, async (message) => {
 
   const nowEST = getESTNow();
   const hourEST = nowEST.getHours();
-  const { start, end } = coachHours[mentionedCoach];
+  const minuteEST = nowEST.getMinutes();
 
-  console.log(`[CHECK] Mentioned coach=${mentionedCoach}, EST hour=${hourEST}, active window=${start}-${end}`);
+  console.log(
+    `[CHECK] Mentioned coach=${mentionedCoach}, EST time=${hourEST}:${minuteEST
+      .toString()
+      .padStart(2, '0')}, active window=${coachHours[mentionedCoach].start.hour}:${coachHours[mentionedCoach].start.minute || 0}-${coachHours[mentionedCoach].end.hour}:${coachHours[mentionedCoach].end.minute || 0}`
+  );
 
-  if (hourEST >= start && hourEST < end) {
+  if (isWithinCoachHours(mentionedCoach, nowEST)) {
     console.log(
       `[INFO] Mention of ${message.author.username} for ${mentionedCoach} received during office hours; skipping queueing.`
     );
@@ -480,7 +536,6 @@ client.on(Events.MessageCreate, async (message) => {
       console.log(`📝 Appended to existing queue entry for ${username} -> ${mentionedCoach}`);
     }
 
-    // recalc position
     const allRecords = await queueTable
       .select({
         filterByFormula: `AND({Mentioned} = "${mentionedCoach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
@@ -489,7 +544,6 @@ client.on(Events.MessageCreate, async (message) => {
       .all();
 
     const uniqueUsers = [...new Set(allRecords.map((r) => r.get('User')))];
-
     const position = uniqueUsers.indexOf(username) + 1;
 
     await message.reply(
@@ -501,14 +555,14 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
-// ---- Daily summary at 1:00 PM EST ----
+// ---- Daily summary at 8:00 AM EST ----
 cron.schedule(
-  '0 13 * * *',
+  '0 8 * * *',
   async () => {
     const today = todayDateEST();
     if (!queueTable) return;
 
-    console.log('🕐 Running daily summary job for', today);
+    console.log('🕗 Running daily summary job for', today);
 
     try {
       const channel = await client.channels.fetch(SUMMARY_CHANNEL_ID);
@@ -569,19 +623,18 @@ cron.schedule(
 setInterval(async () => {
   const nowEST = getESTNow();
   const today = nowEST.toISOString().split('T')[0];
-  const hourEST = nowEST.getHours();
-  const minuteEST = nowEST.getMinutes();
+  const minutesNow = nowEST.getHours() * 60 + nowEST.getMinutes();
 
   for (const coach of Object.keys(coachHours)) {
     const { end } = coachHours[coach];
-    const remindHour = end - 1;
+    const endMin = toMinutes(end);
+    const remindMin = endMin - 60; // one hour before end
 
-    // Reset if new day
     if (reminderSent[coach] && reminderSent[coach] !== today) {
       delete reminderSent[coach];
     }
 
-    if (hourEST === remindHour && minuteEST === 0 && !reminderSent[coach]) {
+    if (minutesNow === remindMin && !reminderSent[coach]) {
       if (!queueTable) continue;
 
       try {
@@ -614,7 +667,9 @@ setInterval(async () => {
           }
         });
 
-        let summary = `⏰ **Reminder:** You have pending queue items for **${coach}** — this is 1 hour before your end of day (${coachHours[coach].end}:00 EST).\n\n`;
+        let summary = `⏰ **Reminder:** You have pending queue items for **${coach}** — this is 1 hour before your end of day (${coachHours[coach].end.hour}:${(coachHours[coach].end.minute || 0)
+          .toString()
+          .padStart(2, '0')} EST).\n\n`;
         let idx = 1;
         for (const [student, info] of Object.entries(byStudent)) {
           const timeStr = formatEST(info.firstSeen);
