@@ -47,7 +47,7 @@ const coachHours = {
   Tugce: { start: 3, end: 4 },
 };
 const coachDiscordIds = {
-  Jeika: '1211621957270894602',
+  Jeika: '852485920023117854',
   Tugce: '1225908721785026580',
 };
 
