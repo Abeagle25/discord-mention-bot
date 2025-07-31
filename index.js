@@ -173,7 +173,7 @@ const clearEntryCommand = new SlashCommandBuilder()
 
 const clearAllCommand = new SlashCommandBuilder()
   .setName('clearall')
-  .setDescription("Clear the entire queue for a coach for today (requires confirmation)")
+  .setDescription("Clear the entire queue for a coach (all dates, requires confirmation)")
   .addStringOption((opt) =>
     opt
       .setName('coach')
@@ -187,7 +187,7 @@ const clearAllCommand = new SlashCommandBuilder()
   .addBooleanOption((opt) =>
     opt
       .setName('confirm')
-      .setDescription('You must set this to true to confirm clearing all entries')
+      .setDescription('You must set this to true to confirm clearing everything for that coach')
       .setRequired(true)
   );
 
@@ -364,7 +364,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (!confirm) {
       return interaction.reply({
-        content: `⚠️ This will remove *all* queue entries for **${coach}** today. If you’re sure, re-run with \`confirm: true\`.`,
+        content: `⚠️ This will remove *all* queue entries for **${coach}** (including prior days). If you’re sure, re-run with \`confirm: true\`.`,
         flags: 64,
       });
     }
@@ -379,16 +379,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
     try {
       await interaction.deferReply({ flags: 64 });
 
+      // No date filter: remove all entries for coach
       const records = await queueTable
         .select({
-          filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
+          filterByFormula: `{Mentioned} = "${coach}"`,
           maxRecords: 1000,
         })
         .all();
 
       if (records.length === 0) {
         await interaction.editReply({
-          content: `ℹ️ No queue entries to clear for **${coach}** today.`,
+          content: `ℹ️ No queue entries to clear for **${coach}**.`,
         });
         return;
       }
@@ -399,7 +400,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       await interaction.editReply({
-        content: `🗑️ Cleared all (${records.length}) queue entr${records.length === 1 ? 'y' : 'ies'} for **${coach}** today.`,
+        content: `🗑️ Cleared all (${records.length}) queue entr${records.length === 1 ? 'y' : 'ies'} for **${coach}** (all dates).`,
       });
     } catch (err) {
       console.error('❌ Error clearing all entries:', err);
@@ -500,9 +501,9 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
-// ---- Daily summary at 8:00 AM EST ----
+// ---- Daily summary at 1:00 PM EST ----
 cron.schedule(
-  '0 8 * * *',
+  '0 13 * * *',
   async () => {
     const today = todayDateEST();
     if (!queueTable) return;
