@@ -114,6 +114,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
+// Keep the bot alive (required for Render)
+const express = require('express');
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (_, res) => {
+  res.send('Bot is running!');
+});
+
+app.listen(PORT, () => {
+  console.log(`🌐 Server listening on port ${PORT}`);
+});
+
+
 // UptimeRobot ping every 4 minutes
 setInterval(() => {
   const url = process.env.SELF_PING_URL || `https://${process.env.RENDER_EXTERNAL_URL}`;
