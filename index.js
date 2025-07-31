@@ -13,8 +13,10 @@ const GUILD_ID = process.env.GUILD_ID;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME;
+const SUMMARY_CHANNEL_ID = process.env.SUMMARY_CHANNEL_ID;
 const PORT = process.env.PORT || 3000;
 
+// Airtable base setup
 const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
 const queueTable = base(AIRTABLE_TABLE_NAME);
 
@@ -24,19 +26,23 @@ const coachHours = {
   'Tugce': { start: 3, end: 22 }
 };
 
-// 🟢 Coach Discord IDs (used for tagging in daily summaries)
+// 🟢 Coach Discord IDs (used for tagging)
 const coachDiscordIds = {
   'Jeika': '1211621957270894602',
   'Tugce': '1225908721785026580'
 };
 
+// Express server for Render
 const app = express();
 app.get('/', (_, res) => res.send('Bot is running!'));
 app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
 
-// Ping every 5 minutes to stay awake
-setInterval(() => fetch(`http://localhost:${PORT}`), 5 * 60 * 1000);
+// Keep alive ping every 5 minutes
+setInterval(() => {
+  fetch(`http://localhost:${PORT}`).catch(() => {});
+}, 5 * 60 * 1000);
 
+// Discord client
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
   partials: [Partials.Channel]
@@ -52,8 +58,8 @@ const queueCommand = new SlashCommandBuilder()
       .setRequired(true)
   );
 
+// Register slash command
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
-
 async function registerSlashCommands() {
   try {
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
@@ -65,7 +71,7 @@ async function registerSlashCommands() {
   }
 }
 
-// Respond to /queue command
+// Handle /queue command
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -91,7 +97,7 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// Handle message mentions and queueing
+// Handle mention outside of working hours
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
 
@@ -105,11 +111,11 @@ client.on('messageCreate', async message => {
   const hour = now.getHours();
   const { start, end } = coachHours[mentionedCoach];
 
-  if (hour >= start && hour < end) return; // within working hours, no reply
+  if (hour >= start && hour < end) return; // inside working hours
 
   const today = now.toISOString().split('T')[0];
 
-  // Check if student is already in queue today for this coach
+  // Check if already queued
   const existing = await queueTable.select({
     filterByFormula: `AND({Mentioned} = "${mentionedCoach}", {user} = "${message.author.username}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`
   }).firstPage();
@@ -122,7 +128,7 @@ client.on('messageCreate', async message => {
     });
   }
 
-  // Fetch updated position
+  // Calculate position
   const records = await queueTable.select({
     filterByFormula: `AND({Mentioned} = "${mentionedCoach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
     sort: [{ field: 'Timestamp', direction: 'asc' }]
@@ -138,7 +144,7 @@ client.on('messageCreate', async message => {
 // Daily summary at 10 PM
 cron.schedule('0 22 * * *', async () => {
   const today = new Date().toISOString().split('T')[0];
-  const channel = await client.channels.fetch('YOUR_DAILY_SUMMARY_CHANNEL_ID');
+  const channel = await client.channels.fetch(SUMMARY_CHANNEL_ID);
 
   if (!channel || !channel.isTextBased()) return;
 
@@ -157,6 +163,7 @@ cron.schedule('0 22 * * *', async () => {
   }
 });
 
+// Ready
 client.once('ready', () => {
   console.log(`🤖 Logged in as ${client.user.tag}`);
 });
