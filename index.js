@@ -1,144 +1,165 @@
-import { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder } from 'discord.js';
-import fetch from 'node-fetch';
+import express from 'express';
+import { Client, GatewayIntentBits, Partials, REST, Routes, SlashCommandBuilder } from 'discord.js';
 import dotenv from 'dotenv';
 import Airtable from 'airtable';
+import cron from 'node-cron';
+import fetch from 'node-fetch';
 
 dotenv.config();
 
-// Airtable config
-const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID);
-const TABLE_NAME = process.env.AIRTABLE_TABLE_NAME;
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
+const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
+const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
+const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME;
+const PORT = process.env.PORT || 3000;
 
-// Coaches
-const JEIKA_ID = '1176627262885072986';
-const TUGCE_ID = '1147977042387992705';
+const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
+const queueTable = base(AIRTABLE_TABLE_NAME);
+
+// 🟢 Coach working hours (24-hour format)
+const coachHours = {
+  'Jeika': { start: 3, end: 22 },
+  'Tugce': { start: 3, end: 22 }
+};
+
+// 🟢 Coach Discord IDs (used for tagging in daily summaries)
+const coachDiscordIds = {
+  'Jeika': '1211621957270894602',
+  'Tugce': '1225908721785026580'
+};
+
+const app = express();
+app.get('/', (_, res) => res.send('Bot is running!'));
+app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+
+// Ping every 5 minutes to stay awake
+setInterval(() => fetch(`http://localhost:${PORT}`), 5 * 60 * 1000);
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+  partials: [Partials.Channel]
 });
 
-const WORK_HOURS = { start: 3, end: 22 }; // 3 AM to 10 PM (in UTC-4)
+// Slash command: /queue
+const queueCommand = new SlashCommandBuilder()
+  .setName('queue')
+  .setDescription("View who's in the queue for a coach")
+  .addStringOption(option =>
+    option.setName('coach')
+      .setDescription('Coach name (Jeika or Tugce)')
+      .setRequired(true)
+  );
 
-const commands = [
-  new SlashCommandBuilder()
-    .setName('queue')
-    .setDescription("See who's in the queue for a coach.")
-    .addStringOption(option =>
-      option
-        .setName('coach')
-        .setDescription('Coach name (jeika or tugce)')
-        .setRequired(true)
-        .addChoices(
-          { name: 'Jeika', value: 'Jeika' },
-          { name: 'Tugce', value: 'Tugce' }
-        )
-    )
-    .toJSON(),
-];
+const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
-client.once(Events.ClientReady, async () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
-  console.log(`🔐 Using DISCORD_TOKEN: ${process.env.DISCORD_TOKEN ? '✅ Set' : '❌ Not Set'}`);
-
-  // Register slash command
-  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+async function registerSlashCommands() {
   try {
-    console.log('🔁 Registering slash commands...');
-    await rest.put(
-      Routes.applicationGuildCommands(client.user.id, '1211718104703311902'), // your server ID
-      { body: commands }
-    );
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
+      body: [queueCommand.toJSON()],
+    });
     console.log('✅ Slash commands registered.');
   } catch (err) {
-    console.error('❌ Failed to register commands:', err);
+    console.error('❌ Failed to register slash commands:', err);
   }
-});
+}
 
-// Slash command interaction
-client.on(Events.InteractionCreate, async interaction => {
+// Respond to /queue command
+client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
+
   if (interaction.commandName === 'queue') {
     const coach = interaction.options.getString('coach');
+    const today = new Date().toISOString().split('T')[0];
 
     try {
-      const records = await base(TABLE_NAME)
-        .select({
-          filterByFormula: `{Mentioned} = "${coach}"`,
-          sort: [{ field: 'Created', direction: 'asc' }],
-        })
-        .firstPage();
+      const records = await queueTable.select({
+        filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`
+      }).all();
 
       if (records.length === 0) {
-        await interaction.reply(`📭 No students currently in the queue for ${coach}.`);
+        await interaction.reply(`No one is currently in the queue for **${coach}**.`);
       } else {
-        const studentList = records.map((record, i) => `${i + 1}. ${record.fields.user}`).join('\n');
-        await interaction.reply(`📋 Queue for ${coach}:\n${studentList}`);
+        const names = records.map(r => r.get('user')).join('\n');
+        await interaction.reply(`Current queue for **${coach}**:\n${names}`);
       }
     } catch (err) {
-      console.error('❌ Error fetching from Airtable:', err);
-      await interaction.reply('⚠️ Failed to fetch queue.');
+      console.error(err);
+      await interaction.reply('There was an error fetching the queue.');
     }
   }
 });
 
-// Message monitoring
-client.on(Events.MessageCreate, async (message) => {
+// Handle message mentions and queueing
+client.on('messageCreate', async message => {
   if (message.author.bot) return;
 
-  const hour = new Date().getUTCHours() - 4; // Convert to UTC-4
-  const isInHours = hour >= WORK_HOURS.start && hour < WORK_HOURS.end;
+  const mentionedCoach = Object.keys(coachDiscordIds).find(coach =>
+    message.mentions.users.has(coachDiscordIds[coach])
+  );
 
-  const mentions = message.mentions.users;
-  const mentionedJeika = mentions.has(JEIKA_ID);
-  const mentionedTugce = mentions.has(TUGCE_ID);
+  if (!mentionedCoach) return;
 
-  if ((mentionedJeika || mentionedTugce) && !isInHours) {
-    const coach = mentionedJeika ? 'Jeika' : 'Tugce';
-    const existingRecords = await base(TABLE_NAME)
-      .select({
-        filterByFormula: `AND({user} = "${message.author.username}", {Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Created}, 'YYYY-MM-DD'), "${new Date().toISOString().split('T')[0]}"))`,
-        maxRecords: 1
-      })
-      .firstPage();
+  const now = new Date();
+  const hour = now.getHours();
+  const { start, end } = coachHours[mentionedCoach];
 
-    if (existingRecords.length === 0) {
-      console.log(`[CHECK] Mentioned: true, Within Hours: false (${coach})`);
-      console.log(`📥 Queued mention for ${coach} from ${message.author.username}`);
+  if (hour >= start && hour < end) return; // within working hours, no reply
 
-      await base(TABLE_NAME).create([
-        {
-          fields: {
-            user: message.author.username,
-            message: message.content,
-            Mentioned: coach,
-          }
-        }
-      ]);
+  const today = now.toISOString().split('T')[0];
 
-      const records = await base(TABLE_NAME)
-        .select({
-          filterByFormula: `{Mentioned} = "${coach}"`,
-          sort: [{ field: 'Created', direction: 'asc' }],
-        })
-        .firstPage();
+  // Check if student is already in queue today for this coach
+  const existing = await queueTable.select({
+    filterByFormula: `AND({Mentioned} = "${mentionedCoach}", {user} = "${message.author.username}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`
+  }).firstPage();
 
-      const position = records.findIndex(r => r.fields.user === message.author.username) + 1;
+  if (existing.length === 0) {
+    await queueTable.create({
+      user: message.author.username,
+      Mentioned: mentionedCoach,
+      Timestamp: now.toISOString()
+    });
+  }
 
-      await message.reply(
-        `🕰️ ${coach} is currently offline.\nI've added you to the queue ✅\nYou're #${position} in line!`
-      );
-    }
+  // Fetch updated position
+  const records = await queueTable.select({
+    filterByFormula: `AND({Mentioned} = "${mentionedCoach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
+    sort: [{ field: 'Timestamp', direction: 'asc' }]
+  }).all();
+
+  const position = records.findIndex(r => r.get('user') === message.author.username) + 1;
+
+  message.reply(`Thanks for your message! ${mentionedCoach} is currently unavailable. You’ve been added to their queue. You’re #${position} today.`);
+
+  console.log(`Queued: ${message.author.username} for ${mentionedCoach} (#${position})`);
+});
+
+// Daily summary at 10 PM
+cron.schedule('0 22 * * *', async () => {
+  const today = new Date().toISOString().split('T')[0];
+  const channel = await client.channels.fetch('YOUR_DAILY_SUMMARY_CHANNEL_ID');
+
+  if (!channel || !channel.isTextBased()) return;
+
+  for (const coach of Object.keys(coachDiscordIds)) {
+    const records = await queueTable.select({
+      filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
+      sort: [{ field: 'Timestamp', direction: 'asc' }]
+    }).all();
+
+    if (records.length === 0) continue;
+
+    const list = records.map((r, i) => `${i + 1}. ${r.get('user')}`).join('\n');
+    const mention = `<@${coachDiscordIds[coach]}>`;
+
+    await channel.send(`📋 Queue for ${coach} today (${today}):\n${mention}\n${list}`);
   }
 });
 
-// Self-ping (every 4 minutes)
-const SELF_PING_URL = process.env.SELF_PING_URL || `https://${process.env.RENDER_EXTERNAL_URL}`;
-setInterval(() => {
-  if (SELF_PING_URL) {
-    fetch(SELF_PING_URL)
-      .then(() => console.log('🔁 Self-ping successful'))
-      .catch(err => console.error('❌ Self-ping failed', err));
-  }
-}, 240000); // 4 minutes
+client.once('ready', () => {
+  console.log(`🤖 Logged in as ${client.user.tag}`);
+});
 
-client.login(process.env.DISCORD_TOKEN);
+registerSlashCommands();
+client.login(DISCORD_TOKEN);
