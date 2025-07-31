@@ -44,7 +44,7 @@ if (AIRTABLE_API_KEY && AIRTABLE_BASE_ID && AIRTABLE_TABLE_NAME) {
 // ---- Coaches config ----
 // Active hours per coach (24h EST)
 const coachHours = {
-  Jeika: { start: 3, end: 4 }, // example test hours
+  Jeika: { start: 3, end: 4 },
   Tugce: { start: 3, end: 4 },
 };
 // Discord IDs used for tagging and permission checks
@@ -245,12 +245,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (!queueTable) {
       return interaction.reply({
         content: '⚠️ Queue table not configured properly.',
-        ephemeral: true,
+        flags: 64,
       });
     }
 
     try {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: 64 });
 
       const records = await queueTable
         .select({
@@ -301,7 +301,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.replied || interaction.deferred) {
         await interaction.editReply({ content: 'There was an error fetching the queue.' });
       } else {
-        await interaction.reply({ content: 'There was an error fetching the queue.', ephemeral: true });
+        await interaction.reply({ content: 'There was an error fetching the queue.', flags: 64 });
       }
     }
   } else if (interaction.commandName === 'clearentry') {
@@ -312,19 +312,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (coachDiscordIds[coach] !== callerId) {
       return interaction.reply({
         content: `❌ You are not authorized to clear entries for ${coach}.`,
-        ephemeral: true,
+        flags: 64,
       });
     }
 
     if (!queueTable) {
       return interaction.reply({
         content: '⚠️ Queue table not configured properly.',
-        ephemeral: true,
+        flags: 64,
       });
     }
 
     try {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: 64 });
 
       const records = await queueTable
         .select({
@@ -352,7 +352,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.replied || interaction.deferred) {
         await interaction.editReply({ content: 'Failed to clear the queue entry.' });
       } else {
-        await interaction.reply({ content: 'Failed to clear the queue entry.', ephemeral: true });
+        await interaction.reply({ content: 'Failed to clear the queue entry.', flags: 64 });
       }
     }
   } else if (interaction.commandName === 'clearall') {
@@ -363,26 +363,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (coachDiscordIds[coach] !== callerId) {
       return interaction.reply({
         content: `❌ You are not authorized to clear entries for ${coach}.`,
-        ephemeral: true,
+        flags: 64,
       });
     }
 
     if (!confirm) {
       return interaction.reply({
         content: `⚠️ This will remove *all* queue entries for **${coach}** (including prior days). If you’re sure, re-run with \`confirm: true\`.`,
-        ephemeral: true,
+        flags: 64,
       });
     }
 
     if (!queueTable) {
       return interaction.reply({
         content: '⚠️ Queue table not configured properly.',
-        ephemeral: true,
+        flags: 64,
       });
     }
 
     try {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: 64 });
 
       const records = await queueTable
         .select({
@@ -411,14 +411,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.replied || interaction.deferred) {
         await interaction.editReply({ content: 'Failed to clear the queue.' });
       } else {
-        await interaction.reply({ content: 'Failed to clear the queue.', ephemeral: true });
+        await interaction.reply({ content: 'Failed to clear the queue.', flags: 64 });
       }
     }
   }
 });
 
-// ---- Mention / queue logic (preserve existing behavior) ----
-// You should have your mention-handling logic below this point (unchanged).
+// ---- Mention / queue logic (your existing behavior should stay here) ----
 
 // ---- Daily summary at 1:00 PM EST ----
 cron.schedule(
@@ -533,7 +532,6 @@ setInterval(async () => {
           }
         });
 
-        // Compose reminder summary
         let summary = `⏰ **Reminder:** You have pending queue items for **${coach}** — this is 1 hour before your end of day (${coachHours[coach].end}:00 EST).\n\n`;
         let idx = 1;
         for (const [student, info] of Object.entries(byStudent)) {
@@ -544,7 +542,6 @@ setInterval(async () => {
         }
         summary += `\nPlease follow up before end of day.`;
 
-        // Try DM coach
         const coachId = coachDiscordIds[coach];
         let sent = false;
         try {
@@ -553,7 +550,7 @@ setInterval(async () => {
           console.log(`✅ Reminder DM sent to ${coach}`);
           sent = true;
         } catch (dmErr) {
-          console.warn(`⚠️ Could not DM ${coach}, will fallback to summary channel:`, dmErr.message);
+          console.warn(`⚠️ Could not DM ${coach}, fallback to summary channel:`, dmErr.message);
         }
 
         if (!sent && SUMMARY_CHANNEL_ID) {
