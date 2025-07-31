@@ -372,6 +372,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         content: `⚠️ This will remove *all* queue entries for **${coach}** (including prior days). If you’re sure, re-run with \`confirm: true\`.`,
         flags: 64,
       });
+      return;
     }
 
     if (!queueTable) {
@@ -417,7 +418,88 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// ---- Mention / queue logic (your existing behavior should stay here) ----
+// ---- Mention / queue logic (with added office-hour log) ----
+client.on(Events.MessageCreate, async (message) => {
+  if (message.author.bot) return;
+
+  console.log(`[MSG] ${message.author.username}: ${message.content}`);
+
+  const mentionedCoach = Object.keys(coachDiscordIds).find((coach) =>
+    message.mentions.users.has(coachDiscordIds[coach])
+  );
+  if (!mentionedCoach) return;
+
+  const nowEST = getESTNow();
+  const hourEST = nowEST.getHours();
+  const { start, end } = coachHours[mentionedCoach];
+
+  console.log(`[CHECK] Mentioned coach=${mentionedCoach}, EST hour=${hourEST}, active window=${start}-${end}`);
+
+  if (hourEST >= start && hourEST < end) {
+    console.log(
+      `[INFO] Mention of ${message.author.username} for ${mentionedCoach} received during office hours; skipping queueing.`
+    );
+    return;
+  }
+
+  if (!queueTable) {
+    console.warn('Airtable not configured; cannot queue.');
+    return;
+  }
+
+  const today = todayDateEST();
+  const username = message.author.username;
+
+  try {
+    const filter = `AND({Mentioned} = "${mentionedCoach}", {User} = "${username}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`;
+
+    const existing = await queueTable
+      .select({
+        filterByFormula: filter,
+        maxRecords: 1,
+      })
+      .firstPage();
+
+    if (existing.length === 0) {
+      const created = await queueTable.create({
+        User: username,
+        Mentioned: mentionedCoach,
+        Timestamp: nowEST.toISOString(),
+        Message: message.content,
+        Channel: message.channel?.name || 'Unknown',
+      });
+      console.log(`📥 New queue entry for ${username} -> ${mentionedCoach} (record ${created.id})`);
+    } else {
+      const existingRecord = existing[0];
+      const prevMsg = existingRecord.get('Message') || '';
+      const updated = prevMsg ? `${prevMsg}\n- ${message.content}` : message.content;
+      await queueTable.update(existingRecord.id, {
+        Message: updated,
+        Channel: message.channel?.name || 'Unknown',
+      });
+      console.log(`📝 Appended to existing queue entry for ${username} -> ${mentionedCoach}`);
+    }
+
+    // recalc position
+    const allRecords = await queueTable
+      .select({
+        filterByFormula: `AND({Mentioned} = "${mentionedCoach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
+        sort: [{ field: 'Timestamp', direction: 'asc' }],
+      })
+      .all();
+
+    const uniqueUsers = [...new Set(allRecords.map((r) => r.get('User')))];
+
+    const position = uniqueUsers.indexOf(username) + 1;
+
+    await message.reply(
+      `Thanks for your message! ${mentionedCoach} is currently unavailable. You’ve been added to their queue. You’re #${position} today.`
+    );
+    console.log(`Queued: ${username} for ${mentionedCoach} (#${position})`);
+  } catch (err) {
+    console.error('❌ Error handling mention:', err);
+  }
+});
 
 // ---- Daily summary at 1:00 PM EST ----
 cron.schedule(
