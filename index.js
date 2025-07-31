@@ -56,7 +56,7 @@ const app = express();
 app.get('/', (_, res) => res.send('Bot is running!'));
 
 app.get('/run-summary-now', async (req, res) => {
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayDate();
   if (!queueTable) return res.status(500).send('Queue table not configured.');
 
   try {
@@ -129,6 +129,9 @@ const queueCommand = new SlashCommandBuilder()
 
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
+// ---- Helpers ----
+const todayDate = () => new Date().toISOString().split('T')[0];
+
 // ---- Ready & register commands ----
 client.once(Events.ClientReady, async () => {
   console.log(`🤖 Discord bot logged in as ${client.user.tag}`);
@@ -142,9 +145,6 @@ client.once(Events.ClientReady, async () => {
     console.error('❌ Failed to register slash commands:', err);
   }
 });
-
-// ---- Helpers ----
-const todayDate = () => new Date().toISOString().split('T')[0];
 
 // ---- Interaction handler (/queue) ----
 client.on(Events.InteractionCreate, async (interaction) => {
@@ -272,14 +272,21 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
-// ---- Daily summary at 1:00 PM ----
-cron.schedule('0 13 * * *', async () => {
+// ---- Daily summary at 1:00 PM UTC (or adjust for timezone) ----
+// If you want 1:00 PM Manila (UTC+8), change schedule to '0 5 * * *' and add timezone:
+// cron.schedule('0 5 * * *', ..., { timezone: 'Asia/Manila' });
+cron.schedule('0 14 * * *', async () => {
   const today = todayDate();
   if (!queueTable) return;
 
+  console.log('🕐 Running daily summary job for', today);
+
   try {
     const channel = await client.channels.fetch(SUMMARY_CHANNEL_ID);
-    if (!channel?.isTextBased?.()) return;
+    if (!channel?.isTextBased?.()) {
+      console.warn('Summary channel not text-based or invalid.');
+      return;
+    }
 
     for (const coach of Object.keys(coachDiscordIds)) {
       const records = await queueTable
