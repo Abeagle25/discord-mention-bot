@@ -44,7 +44,7 @@ if (AIRTABLE_API_KEY && AIRTABLE_BASE_ID && AIRTABLE_TABLE_NAME) {
 // ---- Coaches config ----
 // Active hours per coach (24h EST)
 const coachHours = {
-  Jeika: { start: 3, end: 4 },
+  Jeika: { start: 3, end: 4 }, // example test hours
   Tugce: { start: 3, end: 4 },
 };
 // Discord IDs used for tagging and permission checks
@@ -52,6 +52,32 @@ const coachDiscordIds = {
   Jeika: '852485920023117854',
   Tugce: '454775533671284746',
 };
+
+// ---- Reminder tracking ----
+const reminderSent = {}; // { coachName: 'YYYY-MM-DD' }
+
+// ---- Helper: EST time handling ----
+function getESTNow() {
+  const now = new Date();
+  const estString = now.toLocaleString('en-US', { timeZone: 'America/New_York' });
+  return new Date(estString);
+}
+function todayDateEST() {
+  return getESTNow().toISOString().split('T')[0];
+}
+function formatEST(iso) {
+  if (!iso) return 'unknown';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: 'America/New_York',
+    });
+  } catch {
+    return iso;
+  }
+}
 
 // ---- Express for health / manual summary ----
 const app = express();
@@ -192,27 +218,6 @@ const clearAllCommand = new SlashCommandBuilder()
   );
 
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
-
-// ---- Helpers ----
-function todayDateEST() {
-  const now = new Date();
-  const estString = now.toLocaleString('en-US', { timeZone: 'America/New_York' });
-  const estDate = new Date(estString);
-  return estDate.toISOString().split('T')[0];
-}
-function formatEST(iso) {
-  if (!iso) return 'unknown';
-  try {
-    const d = new Date(iso);
-    return d.toLocaleTimeString('en-US', {
-      hour: '2-digit',
-      minute: '2-digit',
-      timeZone: 'America/New_York',
-    });
-  } catch {
-    return iso;
-  }
-}
 
 // ---- Ready & register commands ----
 client.once(Events.ClientReady, async () => {
@@ -379,7 +384,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     try {
       await interaction.deferReply({ ephemeral: true });
 
-      // No date filter: remove all entries for coach
       const records = await queueTable
         .select({
           filterByFormula: `{Mentioned} = "${coach}"`,
@@ -413,9 +417,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// ---- Mention / queue logic ----
-// (unchanged from your existing code; omitted here for brevity)
+// ---- Mention / queue logic (preserve existing behavior) ----
+// You should have your mention-handling logic below this point (unchanged).
 
+// ---- Daily summary at 1:00 PM EST ----
 cron.schedule(
   '0 13 * * *',
   async () => {
@@ -461,7 +466,7 @@ cron.schedule(
           }
         });
 
-        let summaryText = `📋 Queue for **${coach}** today (${today})\n<@${coachDiscordIds[coach]}>\n\n`;
+        let summaryText = `📋 Queue for **${coach}** today (${today}):\n<@${coachDiscordIds[coach]}>\n\n`;
         for (const [student, info] of Object.entries(byStudent)) {
           const timeStr = formatEST(info.firstSeen);
           const combined = [...new Set(info.messages)].join(' / ');
@@ -478,6 +483,94 @@ cron.schedule(
     timezone: 'America/New_York',
   }
 );
+
+// ---- 1-hour-before-end reminder (EST) ----
+setInterval(async () => {
+  const nowEST = getESTNow();
+  const today = nowEST.toISOString().split('T')[0];
+  const hourEST = nowEST.getHours();
+  const minuteEST = nowEST.getMinutes();
+
+  for (const coach of Object.keys(coachHours)) {
+    const { end } = coachHours[coach];
+    const remindHour = end - 1;
+
+    // Reset if new day
+    if (reminderSent[coach] && reminderSent[coach] !== today) {
+      delete reminderSent[coach];
+    }
+
+    if (hourEST === remindHour && minuteEST === 0 && !reminderSent[coach]) {
+      if (!queueTable) continue;
+
+      try {
+        const records = await queueTable
+          .select({
+            filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
+            sort: [{ field: 'Timestamp', direction: 'asc' }],
+          })
+          .all();
+
+        if (records.length === 0) continue;
+
+        const byStudent = {};
+        records.forEach((r) => {
+          const user = r.get('User') || 'Unknown';
+          const msg = r.get('Message') || '';
+          const channel = r.get('Channel') || 'Unknown';
+          const timestamp = r.get('Timestamp');
+
+          if (!byStudent[user]) {
+            byStudent[user] = {
+              firstSeen: timestamp,
+              channel,
+              messages: [],
+            };
+          }
+          byStudent[user].messages.push(msg);
+          if (timestamp && new Date(timestamp) < new Date(byStudent[user].firstSeen)) {
+            byStudent[user].firstSeen = timestamp;
+          }
+        });
+
+        // Compose reminder summary
+        let summary = `⏰ **Reminder:** You have pending queue items for **${coach}** — this is 1 hour before your end of day (${coachHours[coach].end}:00 EST).\n\n`;
+        let idx = 1;
+        for (const [student, info] of Object.entries(byStudent)) {
+          const timeStr = formatEST(info.firstSeen);
+          const combined = [...new Set(info.messages)].join(' / ');
+          summary += `${idx}. **${student}** (first at ${timeStr} EST in #${info.channel}): "${combined}"\n`;
+          idx += 1;
+        }
+        summary += `\nPlease follow up before end of day.`;
+
+        // Try DM coach
+        const coachId = coachDiscordIds[coach];
+        let sent = false;
+        try {
+          const user = await client.users.fetch(coachId);
+          await user.send(summary);
+          console.log(`✅ Reminder DM sent to ${coach}`);
+          sent = true;
+        } catch (dmErr) {
+          console.warn(`⚠️ Could not DM ${coach}, will fallback to summary channel:`, dmErr.message);
+        }
+
+        if (!sent && SUMMARY_CHANNEL_ID) {
+          const channel = await client.channels.fetch(SUMMARY_CHANNEL_ID);
+          if (channel?.isTextBased?.()) {
+            await channel.send(`<@${coachDiscordIds[coach]}>\n${summary}`);
+            console.log(`✅ Reminder posted in summary channel for ${coach}`);
+          }
+        }
+
+        reminderSent[coach] = today;
+      } catch (err) {
+        console.error(`❌ Failed to send 1h-before-end reminder for ${coach}:`, err);
+      }
+    }
+  }
+}, 60 * 1000); // every minute
 
 // ---- Startup ----
 client.login(DISCORD_TOKEN).catch((err) => {
