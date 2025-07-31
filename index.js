@@ -62,6 +62,10 @@ const coachDiscordIds = {
 // ---- Reminder tracking ----
 const reminderSent = {}; // { coachName: 'YYYY-MM-DD' }
 
+// ---- Deduplication sets ----
+const processingMessages = new Set();
+const repliedMentions = new Set();
+
 // ---- Time helpers (EST) ----
 function getESTNow() {
   const now = new Date();
@@ -244,7 +248,6 @@ const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 async function memberHasRequiredRole(interaction) {
   if (!REQUIRED_ROLE_ID) return false;
   let member = interaction.member;
-  // If roles not populated, fetch
   if (!member || !member.roles || !member.roles.cache) {
     try {
       if (interaction.guild) {
@@ -481,9 +484,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// ---- Mention / queue logic (with office-hour log and EST handling) ----
+// ---- Mention / queue logic (with office-hour log, EST handling, and dedupe) ----
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
+
+  // dedupe processing
+  if (processingMessages.has(message.id)) return;
+  processingMessages.add(message.id);
+  setTimeout(() => processingMessages.delete(message.id), 2 * 60 * 1000); // cleanup
 
   console.log(`[MSG] ${message.author.username}: ${message.content}`);
 
@@ -491,6 +499,9 @@ client.on(Events.MessageCreate, async (message) => {
     message.mentions.users.has(coachDiscordIds[coach])
   );
   if (!mentionedCoach) return;
+
+  // avoid double reply for same message
+  if (repliedMentions.has(message.id)) return;
 
   const nowEST = getESTNow();
   const hourEST = nowEST.getHours();
@@ -560,6 +571,7 @@ client.on(Events.MessageCreate, async (message) => {
     await message.reply(
       `Thanks for your message! ${mentionedCoach} is currently unavailable. You’ve been added to their queue. You’re #${position} today.`
     );
+    repliedMentions.add(message.id);
     console.log(`Queued: ${username} for ${mentionedCoach} (#${position})`);
   } catch (err) {
     console.error('❌ Error handling mention:', err);
@@ -568,7 +580,7 @@ client.on(Events.MessageCreate, async (message) => {
 
 // ---- Daily summary at 8:00 AM EST ----
 cron.schedule(
-  '15 16 * * *',
+  '0 8 * * *',
   async () => {
     const today = todayDateEST();
     if (!queueTable) return;
