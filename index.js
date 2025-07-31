@@ -171,6 +171,26 @@ const clearEntryCommand = new SlashCommandBuilder()
       .setRequired(true)
   );
 
+const clearAllCommand = new SlashCommandBuilder()
+  .setName('clearall')
+  .setDescription("Clear the entire queue for a coach for today (requires confirmation)")
+  .addStringOption((opt) =>
+    opt
+      .setName('coach')
+      .setDescription('Coach name (Jeika or Tugce)')
+      .setRequired(true)
+      .addChoices(
+        { name: 'Jeika', value: 'Jeika' },
+        { name: 'Tugce', value: 'Tugce' }
+      )
+  )
+  .addBooleanOption((opt) =>
+    opt
+      .setName('confirm')
+      .setDescription('You must set this to true to confirm clearing all entries')
+      .setRequired(true)
+  );
+
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
 // ---- Helpers ----
@@ -180,7 +200,6 @@ function todayDateEST() {
   const estDate = new Date(estString);
   return estDate.toISOString().split('T')[0];
 }
-
 function formatEST(iso) {
   if (!iso) return 'unknown';
   try {
@@ -201,7 +220,7 @@ client.once(Events.ClientReady, async () => {
   try {
     console.log('🔁 Registering slash commands...');
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
-      body: [queueCommand.toJSON(), clearEntryCommand.toJSON()],
+      body: [queueCommand.toJSON(), clearEntryCommand.toJSON(), clearAllCommand.toJSON()],
     });
     console.log('✅ Slash commands registered.');
   } catch (err) {
@@ -285,7 +304,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const student = interaction.options.getString('student');
     const callerId = interaction.user.id;
 
-    // permission: only the coach themselves can clear their queue
     if (coachDiscordIds[coach] !== callerId) {
       return interaction.reply({
         content: `❌ You are not authorized to clear entries for ${coach}.`,
@@ -303,7 +321,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     try {
       await interaction.deferReply({ flags: 64 });
 
-      // find today's records for that coach+student
       const records = await queueTable
         .select({
           filterByFormula: `AND({Mentioned} = "${coach}", {User} = "${student}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
@@ -317,12 +334,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      // delete them
       const ids = records.map((r) => r.id);
-      // Airtable allows deleting up to 10 at a time
       for (let i = 0; i < ids.length; i += 10) {
-        const slice = ids.slice(i, i + 10);
-        await queueTable.destroy(slice);
+        await queueTable.destroy(ids.slice(i, i + 10));
       }
 
       await interaction.editReply({
@@ -334,6 +348,65 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.editReply({ content: 'Failed to clear the queue entry.' });
       } else {
         await interaction.reply({ content: 'Failed to clear the queue entry.', flags: 64 });
+      }
+    }
+  } else if (interaction.commandName === 'clearall') {
+    const coach = interaction.options.getString('coach');
+    const confirm = interaction.options.getBoolean('confirm');
+    const callerId = interaction.user.id;
+
+    if (coachDiscordIds[coach] !== callerId) {
+      return interaction.reply({
+        content: `❌ You are not authorized to clear entries for ${coach}.`,
+        flags: 64,
+      });
+    }
+
+    if (!confirm) {
+      return interaction.reply({
+        content: `⚠️ This will remove *all* queue entries for **${coach}** today. If you’re sure, re-run with \`confirm: true\`.`,
+        flags: 64,
+      });
+    }
+
+    if (!queueTable) {
+      return interaction.reply({
+        content: '⚠️ Queue table not configured properly.',
+        flags: 64,
+      });
+    }
+
+    try {
+      await interaction.deferReply({ flags: 64 });
+
+      const records = await queueTable
+        .select({
+          filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
+          maxRecords: 1000,
+        })
+        .all();
+
+      if (records.length === 0) {
+        await interaction.editReply({
+          content: `ℹ️ No queue entries to clear for **${coach}** today.`,
+        });
+        return;
+      }
+
+      const ids = records.map((r) => r.id);
+      for (let i = 0; i < ids.length; i += 10) {
+        await queueTable.destroy(ids.slice(i, i + 10));
+      }
+
+      await interaction.editReply({
+        content: `🗑️ Cleared all (${records.length}) queue entr${records.length === 1 ? 'y' : 'ies'} for **${coach}** today.`,
+      });
+    } catch (err) {
+      console.error('❌ Error clearing all entries:', err);
+      if (interaction.replied || interaction.deferred) {
+        await interaction.editReply({ content: 'Failed to clear the queue.' });
+      } else {
+        await interaction.reply({ content: 'Failed to clear the queue.', flags: 64 });
       }
     }
   }
@@ -351,7 +424,7 @@ client.on(Events.MessageCreate, async (message) => {
   if (!mentionedCoach) return;
 
   const now = new Date();
-  // Use EST hour for working hours check
+  // EST hour for working hours check
   const estHour = new Date(
     now.toLocaleString('en-US', { timeZone: 'America/New_York' })
   ).getHours();
@@ -427,9 +500,9 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
-// ---- Daily summary at 1:00 PM EST ----
+// ---- Daily summary at 8:00 AM EST ----
 cron.schedule(
-  '0 13 * * *',
+  '0 8 * * *',
   async () => {
     const today = todayDateEST();
     if (!queueTable) return;
