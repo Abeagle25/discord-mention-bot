@@ -103,53 +103,81 @@ function isWithinCoachHours(coach, estDate) {
 const app = express();
 app.get('/', (_, res) => res.send('Bot is running!'));
 
+async function buildAndSendSummaryForCoach(coach) {
+  const today = todayDateEST();
+  if (!queueTable) return;
+  const records = await queueTable
+    .select({
+      filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
+      sort: [{ field: 'Timestamp', direction: 'asc' }],
+    })
+    .all();
+  if (records.length === 0) return;
+
+  // build per-student detail with individual messages
+  const byStudent = {};
+  records.forEach((r) => {
+    const user = r.get('User') || 'Unknown';
+    const msg = r.get('Message') || '';
+    const channel = r.get('Channel') || 'Unknown';
+    const timestamp = r.get('Timestamp');
+
+    if (!byStudent[user]) {
+      byStudent[user] = {
+        firstSeen: timestamp,
+        channels: new Set([channel]),
+        messages: [],
+      };
+    } else {
+      byStudent[user].channels.add(channel);
+      if (
+        timestamp &&
+        new Date(timestamp) < new Date(byStudent[user].firstSeen)
+      ) {
+        byStudent[user].firstSeen = timestamp;
+      }
+    }
+
+    byStudent[user].messages.push({
+      text: msg,
+      timestamp,
+      channel,
+    });
+  });
+
+  // format summary: numbered students, each with bulleted messages
+  let summaryText = `📋 Queue for **${coach}** today (${today}):\n<@${coachDiscordIds[coach]}>\n\n`;
+  let studentIdx = 1;
+  for (const [student, info] of Object.entries(byStudent)) {
+    const firstSeenStr = formatEST(info.firstSeen);
+    const channelList = [...info.channels].map((c) => `#${c}`).join(', ');
+    summaryText += `${studentIdx}. **${student}** (first at ${firstSeenStr} EST in ${channelList}):\n`;
+    // dedupe identical messages while preserving order
+    const seenMsgs = new Set();
+    for (const m of info.messages) {
+      const timeStr = formatEST(m.timestamp);
+      const key = `${m.text}||${m.channel}||${timeStr}`;
+      if (seenMsgs.has(key)) continue;
+      seenMsgs.add(key);
+      summaryText += `   - [${timeStr} EST in #${m.channel}] ${m.text}\n`;
+    }
+    studentIdx += 1;
+  }
+
+  const channel = await client.channels.fetch(SUMMARY_CHANNEL_ID);
+  if (channel?.isTextBased?.()) {
+    await channel.send(summaryText);
+  }
+}
+
 app.get('/run-summary-now', async (req, res) => {
   const today = todayDateEST();
   if (!queueTable) return res.status(500).send('Queue table not configured.');
 
   try {
-    const channel = await client.channels.fetch(SUMMARY_CHANNEL_ID);
-    if (!channel?.isTextBased?.()) return res.status(500).send('Summary channel invalid.');
-
     for (const coach of Object.keys(coachDiscordIds)) {
-      const records = await queueTable
-        .select({
-          filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
-          sort: [{ field: 'Timestamp', direction: 'asc' }],
-        })
-        .all();
-      if (records.length === 0) continue;
-
-      const byStudent = {};
-      records.forEach((r) => {
-        const user = r.get('User') || 'Unknown';
-        if (!byStudent[user]) {
-          byStudent[user] = {
-            firstSeen: r.get('Timestamp'),
-            channel: r.get('Channel') || 'Unknown',
-            messages: [],
-          };
-        }
-        const msg = r.get('Message') || '';
-        byStudent[user].messages.push(msg);
-        if (
-          r.get('Timestamp') &&
-          new Date(r.get('Timestamp')) < new Date(byStudent[user].firstSeen)
-        ) {
-          byStudent[user].firstSeen = r.get('Timestamp');
-        }
-      });
-
-      let summaryText = `📋 Queue for **${coach}** today (${today})\n<@${coachDiscordIds[coach]}>\n\n`;
-      for (const [student, info] of Object.entries(byStudent)) {
-        const timeStr = formatEST(info.firstSeen);
-        const combined = [...new Set(info.messages)].join(' / ');
-        summaryText += `**${student}** (first at ${timeStr} EST in #${info.channel}): "${combined}"\n`;
-      }
-
-      await channel.send(summaryText);
+      await buildAndSendSummaryForCoach(coach);
     }
-
     res.send('Summary sent manually.');
   } catch (err) {
     console.error('❌ Manual summary error:', err);
@@ -316,51 +344,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     try {
       await interaction.deferReply({ flags: 64 });
-
-      const records = await queueTable
-        .select({
-          filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
-          sort: [{ field: 'Timestamp', direction: 'asc' }],
-        })
-        .all();
-
-      if (records.length === 0) {
-        await safeReply(interaction, {
-          content: `📭 No one is currently in the queue for **${coach}** today.`,
-        });
-        return;
-      }
-
-      const byStudent = {};
-      for (const r of records) {
-        const user = r.get('User') || 'Unknown';
-        const message = r.get('Message') || '';
-        const channel = r.get('Channel') || 'Unknown';
-        const timestamp = r.get('Timestamp');
-
-        if (!byStudent[user]) {
-          byStudent[user] = {
-            firstSeen: timestamp,
-            channel,
-            messages: [],
-          };
-        }
-        byStudent[user].messages.push(message);
-        if (timestamp && new Date(timestamp) < new Date(byStudent[user].firstSeen)) {
-          byStudent[user].firstSeen = timestamp;
-        }
-      }
-
-      let reply = `📋 **Queue for ${coach}** (sorted by first mention):\n\n`;
-      let idx = 1;
-      for (const [student, info] of Object.entries(byStudent)) {
-        const timeStr = formatEST(info.firstSeen);
-        const combined = [...new Set(info.messages)].join(' / ');
-        reply += `${idx}. **${student}** (first at ${timeStr} EST in #${info.channel}): "${combined}"\n`;
-        idx += 1;
-      }
-
-      await safeReply(interaction, { content: reply });
+      await buildAndSendSummaryForCoach(coach);
+      // Acknowledge with a short confirmation (since summary already posted)
+      await safeReply(interaction, {
+        content: `✅ Summary for **${coach}** sent.`, 
+        flags: 64,
+      });
     } catch (err) {
       console.error('❌ Error fetching queue:', err);
       await safeReply(interaction, {
@@ -500,8 +489,10 @@ client.on(Events.MessageCreate, async (message) => {
   );
   if (!mentionedCoach) return;
 
-  // avoid double reply for same message
+  // avoid double handling: if already replied for this message, skip
   if (repliedMentions.has(message.id)) return;
+  // mark early to prevent races
+  repliedMentions.add(message.id);
 
   const nowEST = getESTNow();
   const hourEST = nowEST.getHours();
@@ -571,7 +562,6 @@ client.on(Events.MessageCreate, async (message) => {
     await message.reply(
       `Thanks for your message! ${mentionedCoach} is currently unavailable. You’ve been added to their queue. You’re #${position} today.`
     );
-    repliedMentions.add(message.id);
     console.log(`Queued: ${username} for ${mentionedCoach} (#${position})`);
   } catch (err) {
     console.error('❌ Error handling mention:', err);
@@ -588,50 +578,8 @@ cron.schedule(
     console.log('🕗 Running daily summary job for', today);
 
     try {
-      const channel = await client.channels.fetch(SUMMARY_CHANNEL_ID);
-      if (!channel?.isTextBased?.()) {
-        console.warn('Summary channel not text-based or invalid.');
-        return;
-      }
-
       for (const coach of Object.keys(coachDiscordIds)) {
-        const records = await queueTable
-          .select({
-            filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
-            sort: [{ field: 'Timestamp', direction: 'asc' }],
-          })
-          .all();
-
-        if (records.length === 0) continue;
-
-        const byStudent = {};
-        records.forEach((r) => {
-          const user = r.get('User') || 'Unknown';
-          if (!byStudent[user]) {
-            byStudent[user] = {
-              firstSeen: r.get('Timestamp'),
-              channel: r.get('Channel') || 'Unknown',
-              messages: [],
-            };
-          }
-          const msg = r.get('Message') || '';
-          byStudent[user].messages.push(msg);
-          if (
-            r.get('Timestamp') &&
-            new Date(r.get('Timestamp')) < new Date(byStudent[user].firstSeen)
-          ) {
-            byStudent[user].firstSeen = r.get('Timestamp');
-          }
-        });
-
-        let summaryText = `📋 Queue for **${coach}** today (${today}):\n<@${coachDiscordIds[coach]}>\n\n`;
-        for (const [student, info] of Object.entries(byStudent)) {
-          const timeStr = formatEST(info.firstSeen);
-          const combined = [...new Set(info.messages)].join(' / ');
-          summaryText += `**${student}** (first at ${timeStr} EST in #${info.channel}): "${combined}"\n`;
-        }
-
-        await channel.send(summaryText);
+        await buildAndSendSummaryForCoach(coach);
       }
     } catch (err) {
       console.error('❌ Summary error:', err);
@@ -641,93 +589,6 @@ cron.schedule(
     timezone: 'America/New_York',
   }
 );
-
-// ---- 1-hour-before-end reminder (EST) ----
-setInterval(async () => {
-  const nowEST = getESTNow();
-  const today = nowEST.toISOString().split('T')[0];
-  const minutesNow = nowEST.getHours() * 60 + nowEST.getMinutes();
-
-  for (const coach of Object.keys(coachHours)) {
-    const { end } = coachHours[coach];
-    const endMin = toMinutes(end);
-    const remindMin = endMin - 60; // one hour before end
-
-    if (reminderSent[coach] && reminderSent[coach] !== today) {
-      delete reminderSent[coach];
-    }
-
-    if (minutesNow === remindMin && !reminderSent[coach]) {
-      if (!queueTable) continue;
-
-      try {
-        const records = await queueTable
-          .select({
-            filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
-            sort: [{ field: 'Timestamp', direction: 'asc' }],
-          })
-          .all();
-
-        if (records.length === 0) continue;
-
-        const byStudent = {};
-        records.forEach((r) => {
-          const user = r.get('User') || 'Unknown';
-          const msg = r.get('Message') || '';
-          const channel = r.get('Channel') || 'Unknown';
-          const timestamp = r.get('Timestamp');
-
-          if (!byStudent[user]) {
-            byStudent[user] = {
-              firstSeen: timestamp,
-              channel,
-              messages: [],
-            };
-          }
-          byStudent[user].messages.push(msg);
-          if (timestamp && new Date(timestamp) < new Date(byStudent[user].firstSeen)) {
-            byStudent[user].firstSeen = timestamp;
-          }
-        });
-
-        let summary = `⏰ **Reminder:** You have pending queue items for **${coach}** — this is 1 hour before your end of day (${coachHours[coach].end.hour}:${(coachHours[coach].end.minute || 0)
-          .toString()
-          .padStart(2, '0')} EST).\n\n`;
-        let idx = 1;
-        for (const [student, info] of Object.entries(byStudent)) {
-          const timeStr = formatEST(info.firstSeen);
-          const combined = [...new Set(info.messages)].join(' / ');
-          summary += `${idx}. **${student}** (first at ${timeStr} EST in #${info.channel}): "${combined}"\n`;
-          idx += 1;
-        }
-        summary += `\nPlease follow up before end of day.`;
-
-        const coachId = coachDiscordIds[coach];
-        let sent = false;
-        try {
-          const user = await client.users.fetch(coachId);
-          await user.send(summary);
-          console.log(`✅ Reminder DM sent to ${coach}`);
-          sent = true;
-        } catch (dmErr) {
-          console.warn(`⚠️ Could not DM ${coach}, fallback to summary channel:`, dmErr.message);
-        }
-
-        if (!sent && SUMMARY_CHANNEL_ID) {
-          const channel = await client.channels.fetch(SUMMARY_CHANNEL_ID);
-          if (channel?.isTextBased?.()) {
-            await channel.send(`<@${coachDiscordIds[coach]}>\n${summary}`);
-            console.log(`✅ Reminder posted in summary channel for ${coach}`);
-          }
-        }
-
-        reminderSent[coach] = today;
-      } catch (err) {
-        console.error(`❌ Failed to send 1h-before-end reminder for ${coach}:`, err);
-      }
-    }
-  }
-}, 60 * 1000); // every minute
 
 // ---- Startup ----
 client.login(DISCORD_TOKEN).catch((err) => {
