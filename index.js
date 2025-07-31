@@ -568,7 +568,7 @@ client.on(Events.MessageCreate, async (message) => {
 
 // ---- Daily summary at 8:00 AM EST ----
 cron.schedule(
-  '0 8 * * *',
+  '15 16 * * *',
   async () => {
     const today = todayDateEST();
     if (!queueTable) return;
