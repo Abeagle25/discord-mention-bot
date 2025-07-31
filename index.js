@@ -162,7 +162,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   try {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: 64 });
 
     const records = await queueTable
       .select({
