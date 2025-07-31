@@ -111,7 +111,7 @@ client.on('shardError', (e) => console.error('Shard error:', e));
 // ---- Helpers ----
 const todayDate = () => new Date().toISOString().split('T')[0];
 
-// ---- Slash commands (queue + clearqueue) ----
+// ---- Slash commands (queue, clearqueue, clearentry) ----
 const queueCommand = new SlashCommandBuilder()
   .setName('queue')
   .setDescription("View who's in the queue for a coach")
@@ -127,9 +127,9 @@ const queueCommand = new SlashCommandBuilder()
   )
   .toJSON();
 
-const clearCommand = new SlashCommandBuilder()
+const clearQueueCommand = new SlashCommandBuilder()
   .setName('clearqueue')
-  .setDescription("Clear today's queue for a coach")
+  .setDescription("Clear today's entire queue for a coach")
   .addStringOption((opt) =>
     opt
       .setName('coach')
@@ -142,6 +142,24 @@ const clearCommand = new SlashCommandBuilder()
   )
   .toJSON();
 
+const clearEntryCommand = new SlashCommandBuilder()
+  .setName('clearentry')
+  .setDescription("Clear a specific student's entry from a coach's queue for today")
+  .addStringOption((opt) =>
+    opt
+      .setName('coach')
+      .setDescription('Coach name (Jeika or Tugce)')
+      .setRequired(true)
+      .addChoices(
+        { name: 'Jeika', value: 'Jeika' },
+        { name: 'Tugce', value: 'Tugce' }
+      )
+  )
+  .addStringOption((opt) =>
+    opt.setName('student').setDescription('Student username to remove').setRequired(true)
+  )
+  .toJSON();
+
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
 // ---- Ready & register commands ----
@@ -150,7 +168,7 @@ client.once(Events.ClientReady, async () => {
   try {
     console.log('🔁 Registering slash commands...');
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
-      body: [queueCommand, clearCommand],
+      body: [queueCommand, clearQueueCommand, clearEntryCommand],
     });
     console.log('✅ Slash commands registered.');
   } catch (err) {
@@ -158,7 +176,7 @@ client.once(Events.ClientReady, async () => {
   }
 });
 
-// ---- Interaction handler (/queue and /clearqueue) ----
+// ---- Interaction handler ----
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   const today = todayDate();
@@ -212,12 +230,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
     }
 
-    // permission check: require Manage Guild
-    if (!interaction.memberPermissions?.has?.(PermissionsBitField.Flags.ManageGuild)) {
-      return interaction.reply({
-        content: '🚫 You do not have permission to clear the queue.',
-        flags: 64,
-      });
+    // permission: coach themself or manage guild
+    const isCoach = interaction.user.id === coachDiscordIds[coach];
+    const hasManage = interaction.memberPermissions?.has?.(PermissionsBitField.Flags.ManageGuild);
+    if (!isCoach && !hasManage) {
+      return interaction.reply({ content: '🚫 You cannot clear this queue.', flags: 64 });
     }
 
     try {
@@ -226,13 +243,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const records = await queueTable
         .select({
           filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
-          maxRecords: 100,
+          maxRecords: 500,
         })
         .all();
 
       if (records.length === 0) {
         await interaction.editReply({
-          content: `There was nothing to clear for **${coach}** today; queue is already empty.`,
+          content: `Nothing to clear for **${coach}** today; queue is empty.`,
         });
         return;
       }
@@ -240,8 +257,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const chunkSize = 10;
       const ids = records.map((r) => r.id);
       for (let i = 0; i < ids.length; i += chunkSize) {
-        const chunk = ids.slice(i, i + chunkSize);
-        await queueTable.destroy(chunk);
+        await queueTable.destroy(ids.slice(i, i + chunkSize));
       }
 
       await interaction.editReply({
@@ -254,6 +270,59 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.editReply({ content: 'Failed to clear the queue.' });
       } else {
         await interaction.reply({ content: 'Failed to clear the queue.', flags: 64 });
+      }
+    }
+  } else if (interaction.commandName === 'clearentry') {
+    const coach = interaction.options.getString('coach');
+    const student = interaction.options.getString('student');
+
+    if (!queueTable) {
+      return interaction.reply({
+        content: '⚠️ Queue table not configured properly.',
+        flags: 64,
+      });
+    }
+
+    // permission: only that coach can remove their student's entry (or manage guild)
+    const isCoach = interaction.user.id === coachDiscordIds[coach];
+    const hasManage = interaction.memberPermissions?.has?.(PermissionsBitField.Flags.ManageGuild);
+    if (!isCoach && !hasManage) {
+      return interaction.reply({ content: '🚫 You cannot remove this entry.', flags: 64 });
+    }
+
+    try {
+      await interaction.deferReply({ flags: 64 });
+
+      const records = await queueTable
+        .select({
+          filterByFormula: `AND({Mentioned} = "${coach}", {User} = "${student}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
+          maxRecords: 100,
+        })
+        .all();
+
+      if (records.length === 0) {
+        await interaction.editReply({
+          content: `No entry found for **${student}** in **${coach}**'s queue today.`,
+        });
+        return;
+      }
+
+      const ids = records.map((r) => r.id);
+      const chunkSize = 10;
+      for (let i = 0; i < ids.length; i += chunkSize) {
+        await queueTable.destroy(ids.slice(i, i + chunkSize));
+      }
+
+      await interaction.editReply({
+        content: `✅ Removed ${records.length} entr${records.length === 1 ? 'y' : 'ies'} for **${student}** from **${coach}**'s queue today.`,
+      });
+      console.log(`🧹 Cleared ${records.length} entries for student ${student} under ${coach} (${today})`);
+    } catch (err) {
+      console.error('❌ Error clearing specific entry:', err);
+      if (interaction.replied || interaction.deferred) {
+        await interaction.editReply({ content: 'Failed to remove the entry.' });
+      } else {
+        await interaction.reply({ content: 'Failed to remove the entry.', flags: 64 });
       }
     }
   }
@@ -341,7 +410,7 @@ client.on(Events.MessageCreate, async (message) => {
 
 // ---- Daily summary at 1:00 PM Eastern Time ----
 cron.schedule(
-  '0 14 * * *',
+  '0 13 * * *',
   async () => {
     const today = todayDate();
     if (!queueTable) return;
