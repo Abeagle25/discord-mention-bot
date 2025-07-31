@@ -44,8 +44,8 @@ if (AIRTABLE_API_KEY && AIRTABLE_BASE_ID && AIRTABLE_TABLE_NAME) {
 // ---- Coaches config ----
 // Active hours per coach (24h EST)
 const coachHours = {
-  Jeika: { start: 3, end: 4 },
-  Tugce: { start: 3, end: 4 },
+  Jeika: { start: 15, end: 16 },
+  Tugce: { start: 15, end: 16 },
 };
 // Discord IDs used for tagging and permission checks
 const coachDiscordIds = {
