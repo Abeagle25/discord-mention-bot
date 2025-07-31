@@ -22,11 +22,9 @@ const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME;
 const SUMMARY_CHANNEL_ID = process.env.SUMMARY_CHANNEL_ID;
+const REQUIRED_ROLE_ID = process.env.REQUIRED_ROLE_ID; // e.g., 1176961256029171773
 const PORT = process.env.PORT || 3000;
 const SELF_PING_URL = process.env.SELF_PING_URL || `https://${process.env.RENDER_EXTERNAL_URL || ''}`;
-
-// Required role ID (Team Ambitious Labs)
-const REQUIRED_ROLE_ID = '1176961256029171773';
 
 // ---- Debug / sanity ----
 console.log(`Using DISCORD_TOKEN: ${DISCORD_TOKEN ? '✅ Set' : '❌ Not Set'}`);
@@ -34,6 +32,7 @@ console.log(`Using CLIENT_ID: ${CLIENT_ID ? '✅ Set' : '❌ Not Set'}`);
 console.log(`Using GUILD_ID: ${GUILD_ID ? '✅ Set' : '❌ Not Set'}`);
 console.log(`Using AIRTABLE_TABLE_NAME: ${AIRTABLE_TABLE_NAME || '❌ Not Set'}`);
 console.log(`Using SUMMARY_CHANNEL_ID: ${SUMMARY_CHANNEL_ID ? '✅ Set' : '❌ Not Set'}`);
+console.log(`Using REQUIRED_ROLE_ID: ${REQUIRED_ROLE_ID ? '✅ Set' : '❌ Not Set'}`);
 
 // ---- Airtable setup ----
 let queueTable = null;
@@ -45,7 +44,7 @@ if (AIRTABLE_API_KEY && AIRTABLE_BASE_ID && AIRTABLE_TABLE_NAME) {
 }
 
 // ---- Coaches config ----
-// Active hours per coach (24h EST, including minutes)
+// Active hours per coach (EST)
 const coachHours = {
   Jeika: { start: { hour: 10, minute: 0 }, end: { hour: 15, minute: 0 } }, // 10AM–3PM EST
   Tugce: { start: { hour: 8, minute: 0 }, end: { hour: 18, minute: 0 } }, // 8AM–6PM EST
@@ -173,9 +172,11 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers, // required to read roles for gating
   ],
 });
 
+// Logging
 client.on('error', (e) => console.error('Discord client error:', e));
 client.on('shardError', (e) => console.error('Shard error:', e));
 
@@ -240,10 +241,34 @@ const clearAllCommand = new SlashCommandBuilder()
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
 // ---- Role check helper ----
-function memberHasRequiredRole(interaction) {
-  const member = interaction.member;
+async function memberHasRequiredRole(interaction) {
+  if (!REQUIRED_ROLE_ID) return false;
+  let member = interaction.member;
+  // If roles not populated, fetch
+  if (!member || !member.roles || !member.roles.cache) {
+    try {
+      if (interaction.guild) {
+        member = await interaction.guild.members.fetch(interaction.user.id);
+      }
+    } catch {
+      return false;
+    }
+  }
   if (!member || !member.roles) return false;
-  return member.roles.cache ? member.roles.cache.has(REQUIRED_ROLE_ID) : false;
+  return member.roles.cache.has(REQUIRED_ROLE_ID);
+}
+
+// ---- Safe reply utility ----
+async function safeReply(interaction, options) {
+  try {
+    if (interaction.replied || interaction.deferred) {
+      await interaction.editReply(options);
+    } else {
+      await interaction.reply(options);
+    }
+  } catch (e) {
+    console.warn('⚠️ safeReply failure:', e.message);
+  }
 }
 
 // ---- Ready & register commands ----
@@ -260,34 +285,20 @@ client.once(Events.ClientReady, async () => {
   }
 });
 
-// ---- Safe reply utilities ----
-async function safeReply(interaction, options) {
-  try {
-    if (interaction.replied || interaction.deferred) {
-      await interaction.editReply(options);
-    } else {
-      await interaction.reply(options);
-    }
-  } catch (e) {
-    // swallow if interaction expired/unknown
-    console.warn('⚠️ safeReply failure:', e.message);
-  }
-}
-
 // ---- Interaction handler ----
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
+  const today = todayDateEST();
+
   // role gating
-  if (!memberHasRequiredRole(interaction)) {
+  if (!(await memberHasRequiredRole(interaction))) {
     await safeReply(interaction, {
       content: `❌ You need the Team Ambitious Labs role to use this command.`,
       flags: 64,
     });
     return;
   }
-
-  const today = todayDateEST();
 
   if (interaction.commandName === 'queue') {
     const coach = interaction.options.getString('coach');
