@@ -253,7 +253,7 @@ client.on(Events.MessageCreate, async (message) => {
 });
 
 // ---- Daily summary at 10 PM ----
-cron.schedule('0 22 * * *', async () => {
+cron.schedule('5 11 * * *', async () => {
   const today = todayDate();
   if (!queueTable) return;
 
