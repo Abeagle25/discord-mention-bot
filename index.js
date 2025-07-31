@@ -42,12 +42,12 @@ if (AIRTABLE_API_KEY && AIRTABLE_BASE_ID && AIRTABLE_TABLE_NAME) {
 }
 
 // ---- Coaches config ----
-// Hours are in 24h local time (you can adjust per coach individually)
+// Active hours per coach (24h EST)
 const coachHours = {
   Jeika: { start: 3, end: 4 },
   Tugce: { start: 3, end: 4 },
 };
-// Discord IDs used for tagging in summaries
+// Discord IDs used for tagging and permission checks
 const coachDiscordIds = {
   Jeika: '852485920023117854',
   Tugce: '454775533671284746',
@@ -57,7 +57,6 @@ const coachDiscordIds = {
 const app = express();
 app.get('/', (_, res) => res.send('Bot is running!'));
 
-// manual trigger for summary
 app.get('/run-summary-now', async (req, res) => {
   const today = todayDateEST();
   if (!queueTable) return res.status(500).send('Queue table not configured.');
@@ -75,7 +74,6 @@ app.get('/run-summary-now', async (req, res) => {
         .all();
       if (records.length === 0) continue;
 
-      // Build grouped summary per student
       const byStudent = {};
       records.forEach((r) => {
         const user = r.get('User') || 'Unknown';
@@ -88,8 +86,10 @@ app.get('/run-summary-now', async (req, res) => {
         }
         const msg = r.get('Message') || '';
         byStudent[user].messages.push(msg);
-        // update firstSeen if earlier
-        if (r.get('Timestamp') && new Date(r.get('Timestamp')) < new Date(byStudent[user].firstSeen)) {
+        if (
+          r.get('Timestamp') &&
+          new Date(r.get('Timestamp')) < new Date(byStudent[user].firstSeen)
+        ) {
           byStudent[user].firstSeen = r.get('Timestamp');
         }
       });
@@ -98,7 +98,7 @@ app.get('/run-summary-now', async (req, res) => {
       for (const [student, info] of Object.entries(byStudent)) {
         const timeStr = formatEST(info.firstSeen);
         const combined = [...new Set(info.messages)].join(' / ');
-        summaryText += `**${student}** (first at ${timeStr} in #${info.channel}): "${combined}"\n`;
+        summaryText += `**${student}** (first at ${timeStr} EST in #${info.channel}): "${combined}"\n`;
       }
 
       await channel.send(summaryText);
@@ -139,7 +139,21 @@ client.on('shardError', (e) => console.error('Shard error:', e));
 // ---- Slash commands setup ----
 const queueCommand = new SlashCommandBuilder()
   .setName('queue')
-  .setDescription("View who's in the queue for a coach (with summary)")
+  .setDescription("View who's in the queue for a coach (with per-student summary)")
+  .addStringOption((opt) =>
+    opt
+      .setName('coach')
+      .setDescription('Coach name (Jeika or Tugce)')
+      .setRequired(true)
+      .addChoices(
+        { name: 'Jeika', value: 'Jeika' },
+        { name: 'Tugce', value: 'Tugce' }
+      )
+  );
+
+const clearEntryCommand = new SlashCommandBuilder()
+  .setName('clearentry')
+  .setDescription("Clear a specific student's queue entry for a coach (today)")
   .addStringOption((opt) =>
     opt
       .setName('coach')
@@ -150,25 +164,23 @@ const queueCommand = new SlashCommandBuilder()
         { name: 'Tugce', value: 'Tugce' }
       )
   )
-  .toJSON();
+  .addStringOption((opt) =>
+    opt
+      .setName('student')
+      .setDescription('Student username to remove from queue')
+      .setRequired(true)
+  );
 
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
 // ---- Helpers ----
-/**
- * Returns current date string in EST (YYYY-MM-DD)
- */
 function todayDateEST() {
   const now = new Date();
-  // Use Intl to shift to America/New_York
-  const est = now.toLocaleString('en-US', { timeZone: 'America/New_York' });
-  const d = new Date(est);
-  return d.toISOString().split('T')[0];
+  const estString = now.toLocaleString('en-US', { timeZone: 'America/New_York' });
+  const estDate = new Date(estString);
+  return estDate.toISOString().split('T')[0];
 }
 
-/**
- * Format ISO timestamp to human-readable EST time
- */
 function formatEST(iso) {
   if (!iso) return 'unknown';
   try {
@@ -187,9 +199,9 @@ function formatEST(iso) {
 client.once(Events.ClientReady, async () => {
   console.log(`🤖 Discord bot logged in as ${client.user.tag}`);
   try {
-    console.log('🔁 Registering slash command /queue...');
+    console.log('🔁 Registering slash commands...');
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
-      body: [queueCommand],
+      body: [queueCommand.toJSON(), clearEntryCommand.toJSON()],
     });
     console.log('✅ Slash commands registered.');
   } catch (err) {
@@ -197,76 +209,132 @@ client.once(Events.ClientReady, async () => {
   }
 });
 
-// ---- Interaction handler (/queue) ----
+// ---- Interaction handler ----
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName !== 'queue') return;
 
-  const coach = interaction.options.getString('coach');
   const today = todayDateEST();
 
-  if (!queueTable) {
-    return interaction.reply({
-      content: '⚠️ Queue table not configured properly.',
-      flags: 64,
-    });
-  }
+  if (interaction.commandName === 'queue') {
+    const coach = interaction.options.getString('coach');
 
-  try {
-    await interaction.deferReply({ flags: 64 });
-
-    const records = await queueTable
-      .select({
-        filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
-        sort: [{ field: 'Timestamp', direction: 'asc' }],
-      })
-      .all();
-
-    if (records.length === 0) {
-      await interaction.editReply({
-        content: `📭 No one is currently in the queue for **${coach}** today.`,
+    if (!queueTable) {
+      return interaction.reply({
+        content: '⚠️ Queue table not configured properly.',
+        flags: 64,
       });
-      return;
     }
 
-    // Group by student and accumulate
-    const byStudent = {};
-    for (const r of records) {
-      const user = r.get('User') || 'Unknown';
-      const message = r.get('Message') || '';
-      const channel = r.get('Channel') || 'Unknown';
-      const timestamp = r.get('Timestamp');
+    try {
+      await interaction.deferReply({ flags: 64 });
 
-      if (!byStudent[user]) {
-        byStudent[user] = {
-          firstSeen: timestamp,
-          channel,
-          messages: [],
-        };
+      const records = await queueTable
+        .select({
+          filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
+          sort: [{ field: 'Timestamp', direction: 'asc' }],
+        })
+        .all();
+
+      if (records.length === 0) {
+        await interaction.editReply({
+          content: `📭 No one is currently in the queue for **${coach}** today.`,
+        });
+        return;
       }
-      byStudent[user].messages.push(message);
-      if (timestamp && new Date(timestamp) < new Date(byStudent[user].firstSeen)) {
-        byStudent[user].firstSeen = timestamp;
+
+      const byStudent = {};
+      for (const r of records) {
+        const user = r.get('User') || 'Unknown';
+        const message = r.get('Message') || '';
+        const channel = r.get('Channel') || 'Unknown';
+        const timestamp = r.get('Timestamp');
+
+        if (!byStudent[user]) {
+          byStudent[user] = {
+            firstSeen: timestamp,
+            channel,
+            messages: [],
+          };
+        }
+        byStudent[user].messages.push(message);
+        if (timestamp && new Date(timestamp) < new Date(byStudent[user].firstSeen)) {
+          byStudent[user].firstSeen = timestamp;
+        }
+      }
+
+      let reply = `📋 **Queue for ${coach}** (sorted by first mention):\n\n`;
+      let idx = 1;
+      for (const [student, info] of Object.entries(byStudent)) {
+        const timeStr = formatEST(info.firstSeen);
+        const combined = [...new Set(info.messages)].join(' / ');
+        reply += `${idx}. **${student}** (first at ${timeStr} EST in #${info.channel}): "${combined}"\n`;
+        idx += 1;
+      }
+
+      await interaction.editReply(reply);
+    } catch (err) {
+      console.error('❌ Error fetching queue:', err);
+      if (interaction.replied || interaction.deferred) {
+        await interaction.editReply({ content: 'There was an error fetching the queue.' });
+      } else {
+        await interaction.reply({ content: 'There was an error fetching the queue.', flags: 64 });
       }
     }
+  } else if (interaction.commandName === 'clearentry') {
+    const coach = interaction.options.getString('coach');
+    const student = interaction.options.getString('student');
+    const callerId = interaction.user.id;
 
-    // Build reply text
-    let reply = `📋 **Queue for ${coach}** (sorted by first mention):\n\n`;
-    let idx = 1;
-    for (const [student, info] of Object.entries(byStudent)) {
-      const timeStr = formatEST(info.firstSeen);
-      const combined = [...new Set(info.messages)].join(' / ');
-      reply += `${idx}. **${student}** (first at ${timeStr} EST in #${info.channel}): "${combined}"\n`;
-      idx += 1;
+    // permission: only the coach themselves can clear their queue
+    if (coachDiscordIds[coach] !== callerId) {
+      return interaction.reply({
+        content: `❌ You are not authorized to clear entries for ${coach}.`,
+        flags: 64,
+      });
     }
 
-    await interaction.editReply(reply);
-  } catch (err) {
-    console.error('❌ Error fetching queue:', err);
-    if (interaction.replied || interaction.deferred) {
-      await interaction.editReply({ content: 'There was an error fetching the queue.' });
-    } else {
-      await interaction.reply({ content: 'There was an error fetching the queue.', flags: 64 });
+    if (!queueTable) {
+      return interaction.reply({
+        content: '⚠️ Queue table not configured properly.',
+        flags: 64,
+      });
+    }
+
+    try {
+      await interaction.deferReply({ flags: 64 });
+
+      // find today's records for that coach+student
+      const records = await queueTable
+        .select({
+          filterByFormula: `AND({Mentioned} = "${coach}", {User} = "${student}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
+        })
+        .all();
+
+      if (records.length === 0) {
+        await interaction.editReply({
+          content: `ℹ️ No queue entries found for **${student}** under **${coach}** today.`,
+        });
+        return;
+      }
+
+      // delete them
+      const ids = records.map((r) => r.id);
+      // Airtable allows deleting up to 10 at a time
+      for (let i = 0; i < ids.length; i += 10) {
+        const slice = ids.slice(i, i + 10);
+        await queueTable.destroy(slice);
+      }
+
+      await interaction.editReply({
+        content: `🗑️ Cleared ${records.length} entr${records.length === 1 ? 'y' : 'ies'} for **${student}** under **${coach}** today.`,
+      });
+    } catch (err) {
+      console.error('❌ Error clearing entry:', err);
+      if (interaction.replied || interaction.deferred) {
+        await interaction.editReply({ content: 'Failed to clear the queue entry.' });
+      } else {
+        await interaction.reply({ content: 'Failed to clear the queue entry.', flags: 64 });
+      }
     }
   }
 });
@@ -283,18 +351,17 @@ client.on(Events.MessageCreate, async (message) => {
   if (!mentionedCoach) return;
 
   const now = new Date();
-  // Determine current hour in coach's local (assuming server is UTC, use EST offset if needed)
-  const hourLocal = new Date(
+  // Use EST hour for working hours check
+  const estHour = new Date(
     now.toLocaleString('en-US', { timeZone: 'America/New_York' })
   ).getHours();
   const { start, end } = coachHours[mentionedCoach];
 
   console.log(
-    `[CHECK] Mentioned coach=${mentionedCoach}, est_hour=${hourLocal}, active window=${start}-${end}`
+    `[CHECK] Mentioned coach=${mentionedCoach}, est_hour=${estHour}, active window=${start}-${end}`
   );
 
-  // If within working hours, skip queueing
-  if (hourLocal >= start && hourLocal < end) {
+  if (estHour >= start && estHour < end) {
     console.log(`Within working hours for ${mentionedCoach}; ignoring mention.`);
     return;
   }
@@ -341,7 +408,6 @@ client.on(Events.MessageCreate, async (message) => {
       );
     }
 
-    // recalc position for logging
     const allRecords = await queueTable
       .select({
         filterByFormula: `AND({Mentioned} = "${mentionedCoach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
