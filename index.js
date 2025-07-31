@@ -6,6 +6,7 @@ import {
   Routes,
   SlashCommandBuilder,
   Events,
+  PermissionsBitField,
 } from 'discord.js';
 import dotenv from 'dotenv';
 import Airtable from 'airtable';
@@ -101,17 +102,16 @@ setInterval(() => {
 
 // ---- Discord client ----
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
 
 client.on('error', (e) => console.error('Discord client error:', e));
 client.on('shardError', (e) => console.error('Shard error:', e));
 
-// ---- Slash command setup ----
+// ---- Helpers ----
+const todayDate = () => new Date().toISOString().split('T')[0];
+
+// ---- Slash commands (queue + clearqueue) ----
 const queueCommand = new SlashCommandBuilder()
   .setName('queue')
   .setDescription("View who's in the queue for a coach")
@@ -127,10 +127,22 @@ const queueCommand = new SlashCommandBuilder()
   )
   .toJSON();
 
-const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+const clearCommand = new SlashCommandBuilder()
+  .setName('clearqueue')
+  .setDescription("Clear today's queue for a coach")
+  .addStringOption((opt) =>
+    opt
+      .setName('coach')
+      .setDescription('Coach name (Jeika or Tugce)')
+      .setRequired(true)
+      .addChoices(
+        { name: 'Jeika', value: 'Jeika' },
+        { name: 'Tugce', value: 'Tugce' }
+      )
+  )
+  .toJSON();
 
-// ---- Helpers ----
-const todayDate = () => new Date().toISOString().split('T')[0];
+const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
 // ---- Ready & register commands ----
 client.once(Events.ClientReady, async () => {
@@ -138,7 +150,7 @@ client.once(Events.ClientReady, async () => {
   try {
     console.log('🔁 Registering slash commands...');
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
-      body: [queueCommand],
+      body: [queueCommand, clearCommand],
     });
     console.log('✅ Slash commands registered.');
   } catch (err) {
@@ -146,48 +158,103 @@ client.once(Events.ClientReady, async () => {
   }
 });
 
-// ---- Interaction handler (/queue) ----
+// ---- Interaction handler (/queue and /clearqueue) ----
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName !== 'queue') return;
-
-  const coach = interaction.options.getString('coach');
   const today = todayDate();
 
-  if (!queueTable) {
-    return interaction.reply({
-      content: '⚠️ Queue table not configured properly.',
-      flags: 64,
-    });
-  }
+  if (interaction.commandName === 'queue') {
+    const coach = interaction.options.getString('coach');
 
-  try {
-    await interaction.deferReply({ flags: 64 });
-
-    const records = await queueTable
-      .select({
-        filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
-        sort: [{ field: 'Timestamp', direction: 'asc' }],
-      })
-      .all();
-
-    if (records.length === 0) {
-      await interaction.editReply({
-        content: `No one is currently in the queue for **${coach}**.`,
-      });
-    } else {
-      const users = [...new Set(records.map((r) => r.get('User') || 'Unknown'))];
-      const formatted = users.map((u, i) => `${i + 1}. ${u}`).join('\n');
-      await interaction.editReply({
-        content: `📋 Queue for **${coach}**:\n${formatted}`,
+    if (!queueTable) {
+      return interaction.reply({
+        content: '⚠️ Queue table not configured properly.',
+        flags: 64,
       });
     }
-  } catch (err) {
-    console.error('❌ Error fetching queue:', err);
-    if (interaction.replied || interaction.deferred) {
-      await interaction.editReply({ content: 'There was an error fetching the queue.' });
-    } else {
-      await interaction.reply({ content: 'There was an error fetching the queue.', flags: 64 });
+
+    try {
+      await interaction.deferReply({ flags: 64 });
+
+      const records = await queueTable
+        .select({
+          filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
+          sort: [{ field: 'Timestamp', direction: 'asc' }],
+        })
+        .all();
+
+      if (records.length === 0) {
+        await interaction.editReply({
+          content: `No one is currently in the queue for **${coach}**.`,
+        });
+      } else {
+        const users = [...new Set(records.map((r) => r.get('User') || 'Unknown'))];
+        const formatted = users.map((u, i) => `${i + 1}. ${u}`).join('\n');
+        await interaction.editReply({
+          content: `📋 Queue for **${coach}**:\n${formatted}`,
+        });
+      }
+    } catch (err) {
+      console.error('❌ Error fetching queue:', err);
+      if (interaction.replied || interaction.deferred) {
+        await interaction.editReply({ content: 'There was an error fetching the queue.' });
+      } else {
+        await interaction.reply({ content: 'There was an error fetching the queue.', flags: 64 });
+      }
+    }
+  } else if (interaction.commandName === 'clearqueue') {
+    const coach = interaction.options.getString('coach');
+
+    if (!queueTable) {
+      return interaction.reply({
+        content: '⚠️ Queue table not configured properly.',
+        flags: 64,
+      });
+    }
+
+    // permission check: require Manage Guild
+    if (!interaction.memberPermissions?.has?.(PermissionsBitField.Flags.ManageGuild)) {
+      return interaction.reply({
+        content: '🚫 You do not have permission to clear the queue.',
+        flags: 64,
+      });
+    }
+
+    try {
+      await interaction.deferReply({ flags: 64 });
+
+      const records = await queueTable
+        .select({
+          filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
+          maxRecords: 100,
+        })
+        .all();
+
+      if (records.length === 0) {
+        await interaction.editReply({
+          content: `There was nothing to clear for **${coach}** today; queue is already empty.`,
+        });
+        return;
+      }
+
+      const chunkSize = 10;
+      const ids = records.map((r) => r.id);
+      for (let i = 0; i < ids.length; i += chunkSize) {
+        const chunk = ids.slice(i, i + chunkSize);
+        await queueTable.destroy(chunk);
+      }
+
+      await interaction.editReply({
+        content: `✅ Cleared ${records.length} entr${records.length === 1 ? 'y' : 'ies'} from **${coach}**'s queue for today.`,
+      });
+      console.log(`🧹 Cleared ${records.length} records for ${coach} (${today})`);
+    } catch (err) {
+      console.error('❌ Error clearing queue:', err);
+      if (interaction.replied || interaction.deferred) {
+        await interaction.editReply({ content: 'Failed to clear the queue.' });
+      } else {
+        await interaction.reply({ content: 'Failed to clear the queue.', flags: 64 });
+      }
     }
   }
 });
@@ -272,42 +339,46 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
-// ---- Daily summary at 1:00 PM UTC (or adjust for timezone) ----
-// If you want 1:00 PM Manila (UTC+8), change schedule to '0 5 * * *' and add timezone:
-// cron.schedule('0 5 * * *', ..., { timezone: 'Asia/Manila' });
-cron.schedule('0 14 * * *', async () => {
-  const today = todayDate();
-  if (!queueTable) return;
+// ---- Daily summary at 1:00 PM Eastern Time ----
+cron.schedule(
+  '0 14 * * *',
+  async () => {
+    const today = todayDate();
+    if (!queueTable) return;
 
-  console.log('🕐 Running daily summary job for', today);
+    console.log('🕐 Running daily summary job for', today);
 
-  try {
-    const channel = await client.channels.fetch(SUMMARY_CHANNEL_ID);
-    if (!channel?.isTextBased?.()) {
-      console.warn('Summary channel not text-based or invalid.');
-      return;
+    try {
+      const channel = await client.channels.fetch(SUMMARY_CHANNEL_ID);
+      if (!channel?.isTextBased?.()) {
+        console.warn('Summary channel not text-based or invalid.');
+        return;
+      }
+
+      for (const coach of Object.keys(coachDiscordIds)) {
+        const records = await queueTable
+          .select({
+            filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
+            sort: [{ field: 'Timestamp', direction: 'asc' }],
+          })
+          .all();
+
+        if (records.length === 0) continue;
+
+        const users = [...new Set(records.map((r) => r.get('User') || 'Unknown'))];
+        const list = users.map((u, i) => `${i + 1}. ${u}`).join('\n');
+        const mention = `<@${coachDiscordIds[coach]}>`;
+
+        await channel.send(`📋 Queue for ${coach} today (${today}):\n${mention}\n${list}`);
+      }
+    } catch (err) {
+      console.error('❌ Summary error:', err);
     }
-
-    for (const coach of Object.keys(coachDiscordIds)) {
-      const records = await queueTable
-        .select({
-          filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
-          sort: [{ field: 'Timestamp', direction: 'asc' }],
-        })
-        .all();
-
-      if (records.length === 0) continue;
-
-      const users = [...new Set(records.map((r) => r.get('User') || 'Unknown'))];
-      const list = users.map((u, i) => `${i + 1}. ${u}`).join('\n');
-      const mention = `<@${coachDiscordIds[coach]}>`;
-
-      await channel.send(`📋 Queue for ${coach} today (${today}):\n${mention}\n${list}`);
-    }
-  } catch (err) {
-    console.error('❌ Summary error:', err);
+  },
+  {
+    timezone: 'America/New_York',
   }
-});
+);
 
 // ---- Startup ----
 client.login(DISCORD_TOKEN).catch((err) => {
