@@ -43,8 +43,8 @@ if (AIRTABLE_API_KEY && AIRTABLE_BASE_ID && AIRTABLE_TABLE_NAME) {
 
 // ---- Coaches config ----
 const coachHours = {
-  Jeika: { start: 3, end: 22 },
-  Tugce: { start: 3, end: 22 },
+  Jeika: { start: 3, end: 4 },
+  Tugce: { start: 3, end: 4 },
 };
 const coachDiscordIds = {
   Jeika: '1211621957270894602',
