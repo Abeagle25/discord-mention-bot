@@ -614,7 +614,7 @@ client.on(Events.MessageCreate, async (message) => {
   if (!mentionedCoach) return;
 
   const todayKey = `${mentionedCoach}-${message.author.id}-${todayDateEST()}`;
-  if (repliedToday.has(todayKey)) return; // one friendly reply per coach-user per ET day
+  const alreadyReplied = repliedToday.has(todayKey); // used only to gate reply, not queueing
 
   const now = new Date();
   const active = coachIsActiveNow(mentionedCoach, now);
@@ -632,18 +632,24 @@ client.on(Events.MessageCreate, async (message) => {
     return;
   }
 
-  // If queueing disabled for that coach, treat as out-of-office: no record, just reply
+  // If queueing disabled for that coach, treat as out-of-office: no record, just reply once
   if (!coachQueueEnabled[mentionedCoach]) {
-    const nextAvailStr = humanReadableNextAvailability(mentionedCoach, now);
-    const replyMessage = `Thank you for your message! Coach ${mentionedCoach} is currently out of office and will be back at ${nextAvailStr} EST. Don’t worry—I’ll make sure you’re on their radar when they return.`;
-    await message.reply({
-      content: replyMessage,
-      allowedMentions: { repliedUser: false },
-    });
-    repliedToday.set(todayKey, true);
-    console.log(
-      `Queueing disabled for ${mentionedCoach}; responded without recording to ${message.author.username}`
-    );
+    if (!alreadyReplied) {
+      const nextAvailStr = humanReadableNextAvailability(mentionedCoach, now);
+      const replyMessage = `Thank you for your message! Coach ${mentionedCoach} is currently out of office and will be back at ${nextAvailStr} EST. Don’t worry—I’ll make sure you’re on their radar when they return.`;
+      await message.reply({
+        content: replyMessage,
+        allowedMentions: { repliedUser: false },
+      });
+      repliedToday.set(todayKey, true);
+      console.log(
+        `Queueing disabled for ${mentionedCoach}; responded without recording to ${message.author.username}`
+      );
+    } else {
+      console.log(
+        `[INFO] Already replied earlier today to ${message.author.username} for ${mentionedCoach} (queue disabled), skipping reply.`
+      );
+    }
     return;
   }
 
@@ -691,17 +697,23 @@ client.on(Events.MessageCreate, async (message) => {
       );
     }
 
-    const nextAvailStr = humanReadableNextAvailability(mentionedCoach, now);
-    const replyMessage = `Thank you for your message! Coach ${mentionedCoach} is currently out of office and will be back at ${nextAvailStr} EST. Don’t worry—I’ll make sure you’re on their radar when they return.`;
-
-    await message.reply({
-      content: replyMessage,
-      allowedMentions: { repliedUser: false },
-    });
-    repliedToday.set(todayKey, true);
-    console.log(
-      `Queued: ${username} for ${mentionedCoach}; replied with availability ${nextAvailStr} EST`
-    );
+    // Reply once per day per coach-user
+    if (!alreadyReplied) {
+      const nextAvailStr = humanReadableNextAvailability(mentionedCoach, now);
+      const replyMessage = `Thank you for your message! Coach ${mentionedCoach} is currently out of office and will be back at ${nextAvailStr} EST. Don’t worry—I’ll make sure you’re on their radar when they return.`;
+      await message.reply({
+        content: replyMessage,
+        allowedMentions: { repliedUser: false },
+      });
+      repliedToday.set(todayKey, true);
+      console.log(
+        `Queued: ${username} for ${mentionedCoach}; replied with availability ${nextAvailStr} EST`
+      );
+    } else {
+      console.log(
+        `[INFO] Already sent availability reply earlier today to ${message.author.username} for ${mentionedCoach}; only updated queue.`
+      );
+    }
   } catch (err) {
     console.error('❌ Error handling mention:', err);
   }
