@@ -73,6 +73,16 @@ const coachDiscordIds = {
   Michael: '673171818437279755',
 };
 
+// In-memory toggle state: true = queueing enabled
+const coachQueueEnabled = {
+  Jeika: true,
+  Tugce: true,
+  Sandro: true,
+  Divine: true,
+  Phil: true,
+  Michael: true,
+};
+
 // ---- Reminder tracking ----
 const reminderSent = {}; // per coach per day
 
@@ -100,7 +110,7 @@ function getETParts(date = new Date()) {
     if (p.type === 'day') extract.day = parseInt(p.value, 10);
     if (p.type === 'hour') extract.hour = parseInt(p.value, 10);
     if (p.type === 'minute') extract.minute = parseInt(p.value, 10);
-    if (p.type === 'weekday') extract.weekday = p.value; // e.g., "Mon"
+    if (p.type === 'weekday') extract.weekday = p.value;
   }
   return extract;
 }
@@ -117,7 +127,7 @@ function formatETTimeFromParts({ hour, minute }) {
 }
 function humanReadableNextAvailability(coach, fromDate = new Date()) {
   const etNow = getETParts(fromDate);
-  const todayWeekday = etNow.weekday; // e.g., "Fri"
+  const todayWeekday = etNow.weekday;
   const schedule = coachHours[coach];
   const nowMinutes = etNow.hour * 60 + etNow.minute;
 
@@ -125,14 +135,12 @@ function humanReadableNextAvailability(coach, fromDate = new Date()) {
     return t.hour * 60 + (t.minute || 0);
   }
 
-  // Weekend -> next Monday first window
   if (todayWeekday === 'Sat' || todayWeekday === 'Sun') {
     const nextWindow = schedule[0];
     const timeStr = formatETTimeFromParts(nextWindow.start);
     return `Monday at ${timeStr}`;
   }
 
-  // Before any window today
   for (const win of schedule) {
     const startMin = minutes(win.start);
     if (nowMinutes < startMin) {
@@ -141,9 +149,8 @@ function humanReadableNextAvailability(coach, fromDate = new Date()) {
     }
   }
 
-  // After today's windows: find next weekday with schedule (skip weekend)
   const weekdayOrder = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  let currentIndex = weekdayOrder.indexOf(todayWeekday);
+  let currentIndex = weekdayOrder.indexOf(etNow.weekday);
   let nextDayName = '';
   for (let i = 1; i <= 7; i++) {
     const candidateIdx = (currentIndex + i) % 7;
@@ -206,7 +213,7 @@ async function buildAndSendSummaryForCoach(coach) {
   if (!queueTable) return;
   const records = await queueTable
     .select({
-      filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
+      filterByFormula: `AND({Mentioned} = "${coach}", DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD") = "${today}")`,
       sort: [{ field: 'Timestamp', direction: 'asc' }],
     })
     .all();
@@ -371,6 +378,10 @@ const clearAllCommand = new SlashCommandBuilder()
       .setRequired(true)
   );
 
+const toggleQueueCommand = new SlashCommandBuilder()
+  .setName('togglequeue')
+  .setDescription('Enable or disable queueing for yourself (coach only)');
+
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
 // ---- Role gating helper ----
@@ -407,13 +418,23 @@ client.once(Events.ClientReady, async () => {
   console.log(`🤖 Discord bot logged in as ${client.user.tag}`);
   try {
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
-      body: [queueCommand.toJSON(), clearEntryCommand.toJSON(), clearAllCommand.toJSON()],
+      body: [
+        queueCommand.toJSON(),
+        clearEntryCommand.toJSON(),
+        clearAllCommand.toJSON(),
+        toggleQueueCommand.toJSON(),
+      ],
     });
     console.log('✅ Slash commands registered.');
   } catch (err) {
     console.error('❌ Failed to register slash commands:', err);
   }
 });
+
+// helper to find coach name by their own user ID
+function coachNameForDiscordId(id) {
+  return Object.entries(coachDiscordIds).find(([, v]) => v === id)?.[0] || null;
+}
 
 // ---- Interaction handler ----
 client.on(Events.InteractionCreate, async (interaction) => {
@@ -431,7 +452,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.commandName === 'queue') {
     const coach = interaction.options.getString('coach');
     if (!queueTable) {
-      await safeReply(interaction, {
+      await interaction.reply({
         content: '⚠️ Queue table not configured properly.',
         flags: 64,
       });
@@ -473,7 +494,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.deferReply({ flags: 64 });
       const records = await queueTable
         .select({
-          filterByFormula: `AND({Mentioned} = "${coach}", {User} = "${student}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
+          filterByFormula: `AND({Mentioned} = "${coach}", {User} = "${student}", DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD") = "${today}")`,
         })
         .all();
       if (records.length === 0) {
@@ -549,6 +570,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
         flags: 64,
       });
     }
+  } else if (interaction.commandName === 'togglequeue') {
+    const coachName = coachNameForDiscordId(interaction.user.id);
+    if (!coachName) {
+      await safeReply(interaction, {
+        content: '❌ Only a coach can toggle their own queueing.',
+        flags: 64,
+      });
+      return;
+    }
+    coachQueueEnabled[coachName] = !coachQueueEnabled[coachName];
+    const state = coachQueueEnabled[coachName] ? 'enabled' : 'disabled';
+    await safeReply(interaction, {
+      content: `✅ Queueing for **${coachName}** is now **${state}**.`,
+      flags: 64,
+    });
+    try {
+      const summaryChannel = await client.channels.fetch(SUMMARY_CHANNEL_ID);
+      if (summaryChannel?.isTextBased?.()) {
+        await summaryChannel.send(
+          `🔁 **${coachName}** has ${state} their queueing automation.`
+        );
+      }
+    } catch (e) {
+      console.warn('Failed to log toggle state to summary channel:', e.message);
+    }
   }
 });
 
@@ -575,7 +621,7 @@ client.on(Events.MessageCreate, async (message) => {
   console.log(
     `[CHECK] Mentioned coach=${mentionedCoach}, ET time=${formatEST(
       now
-    )}, in-office=${active}`
+    )}, in-office=${active}, queueEnabled=${coachQueueEnabled[mentionedCoach]}`
   );
 
   // In-office hours: do nothing except log
@@ -586,6 +632,22 @@ client.on(Events.MessageCreate, async (message) => {
     return;
   }
 
+  // If queueing disabled for that coach, treat as out-of-office: no record, just reply
+  if (!coachQueueEnabled[mentionedCoach]) {
+    const nextAvailStr = humanReadableNextAvailability(mentionedCoach, now);
+    const replyMessage = `Thank you for your message! Coach ${mentionedCoach} is currently out of office and will be back at ${nextAvailStr} EST. Don’t worry—I’ll make sure you’re on their radar when they return.`;
+    await message.reply({
+      content: replyMessage,
+      allowedMentions: { repliedUser: false },
+    });
+    repliedToday.set(todayKey, true);
+    console.log(
+      `Queueing disabled for ${mentionedCoach}; responded without recording to ${message.author.username}`
+    );
+    return;
+  }
+
+  // Normal outside-hours queueing (enabled)
   if (!queueTable) {
     console.warn('Airtable not configured; cannot queue.');
     return;
@@ -595,7 +657,7 @@ client.on(Events.MessageCreate, async (message) => {
   const username = message.author.username;
 
   try {
-    const filter = `AND({Mentioned} = "${mentionedCoach}", {User} = "${username}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`;
+    const filter = `AND({Mentioned} = "${mentionedCoach}", {User} = "${username}", DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD") = "${today}")`;
     const existing = await queueTable
       .select({
         filterByFormula: filter,
@@ -629,10 +691,7 @@ client.on(Events.MessageCreate, async (message) => {
       );
     }
 
-    const nextAvailStr = humanReadableNextAvailability(
-      mentionedCoach,
-      now
-    );
+    const nextAvailStr = humanReadableNextAvailability(mentionedCoach, now);
     const replyMessage = `Thank you for your message! Coach ${mentionedCoach} is currently out of office and will be back at ${nextAvailStr} EST. Don’t worry—I’ll make sure you’re on their radar when they return.`;
 
     await message.reply({
