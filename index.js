@@ -28,11 +28,10 @@ const SELF_PING_URL =
   process.env.SELF_PING_URL || `https://${process.env.RENDER_EXTERNAL_URL || ''}`;
 
 // ---- Debug / sanity ----
+console.log(`PID ${process.pid} starting up`);
 console.log(`Using DISCORD_TOKEN: ${DISCORD_TOKEN ? '✅ Set' : '❌ Not Set'}`);
 console.log(`Using CLIENT_ID: ${CLIENT_ID ? '✅ Set' : '❌ Not Set'}`);
-console.log(
-  `Using GUILD_ID: ${GUILD_ID ? '✅ Set' : '❌ Not Set'}`
-);
+console.log(`Using GUILD_ID: ${GUILD_ID ? '✅ Set' : '❌ Not Set'}`);
 console.log(
   `Using AIRTABLE_TABLE_NAME: ${AIRTABLE_TABLE_NAME || '❌ Not Set'}`
 );
@@ -53,7 +52,7 @@ if (AIRTABLE_API_KEY && AIRTABLE_BASE_ID && AIRTABLE_TABLE_NAME) {
 }
 
 // ---- Coaches config ----
-// Active windows per coach in EST
+// Active windows per coach in ET
 const coachHours = {
   Jeika: [{ start: { hour: 10, minute: 0 }, end: { hour: 15, minute: 0 } }], // 10AM–3PM
   Tugce: [{ start: { hour: 8, minute: 0 }, end: { hour: 18, minute: 0 } }], // 8AM–6PM
@@ -83,7 +82,6 @@ const repliedToday = new Map(); // key `${coach}-${userId}-${date}`
 
 // ---- Time helpers (ET) ----
 function getETParts(date = new Date()) {
-  // returns object with year, month (1-12), day, hour (0-23), minute, weekday (0=Sunday)
   const fmt = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
     hour12: false,
@@ -104,19 +102,13 @@ function getETParts(date = new Date()) {
     if (p.type === 'minute') extract.minute = parseInt(p.value, 10);
     if (p.type === 'weekday') extract.weekday = p.value; // e.g., "Mon"
   }
-  return extract; // weekday like "Mon", "Tue"
+  return extract;
 }
 function isWeekendET(date = new Date()) {
   const etParts = getETParts(date);
-  // we can map weekday abbreviation
   return etParts.weekday === 'Sat' || etParts.weekday === 'Sun';
 }
 function formatETTimeFromParts({ hour, minute }) {
-  // build a dummy Date in ET timezone just for formatting: use today's date and replace hour/minute, then format with Intl
-  const now = new Date();
-  const etParts = getETParts(now);
-  // Construct a string "YYYY-MM-DDTHH:MM:00" in ET and convert to a Date by interpreting as ET via locale formatting hack:
-  // Simpler: format manually to 12-hour
   let h12 = hour % 12;
   if (h12 === 0) h12 = 12;
   const ampm = hour >= 12 ? 'PM' : 'AM';
@@ -124,51 +116,40 @@ function formatETTimeFromParts({ hour, minute }) {
   return `${h12}:${mm} ${ampm}`;
 }
 function humanReadableNextAvailability(coach, fromDate = new Date()) {
-  // returns string like "Monday at 6:00 AM" or "6:00 AM" if same ET day
   const etNow = getETParts(fromDate);
   const todayWeekday = etNow.weekday; // e.g., "Fri"
-  const schedule = coachHours[coach]; // array of windows
-  // Helper to compare time in minutes
+  const schedule = coachHours[coach];
   const nowMinutes = etNow.hour * 60 + etNow.minute;
 
   function minutes(t) {
     return t.hour * 60 + (t.minute || 0);
   }
 
-  // If weekend, jump to next Monday's first start
-  const weekdayOrder = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  const isWeekend = todayWeekday === 'Sat' || todayWeekday === 'Sun';
-  if (isWeekend) {
-    // find next Monday
-    let offsetDays = 0;
-    if (todayWeekday === 'Sat') offsetDays = 2;
-    if (todayWeekday === 'Sun') offsetDays = 1;
-    // choose first window of next workday
+  // Weekend -> next Monday first window
+  if (todayWeekday === 'Sat' || todayWeekday === 'Sun') {
     const nextWindow = schedule[0];
     const timeStr = formatETTimeFromParts(nextWindow.start);
     return `Monday at ${timeStr}`;
   }
 
-  // Check if before any window today
+  // Before any window today
   for (const win of schedule) {
     const startMin = minutes(win.start);
     if (nowMinutes < startMin) {
-      // upcoming today
       const timeStr = formatETTimeFromParts(win.start);
       return `${timeStr}`;
     }
   }
 
-  // After all windows today: roll to next workday (skip weekend)
+  // After today's windows: find next weekday with schedule (skip weekend)
+  const weekdayOrder = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   let currentIndex = weekdayOrder.indexOf(todayWeekday);
-  let found = false;
   let nextDayName = '';
   for (let i = 1; i <= 7; i++) {
     const candidateIdx = (currentIndex + i) % 7;
     const candidateWeekday = weekdayOrder[candidateIdx];
     if (candidateWeekday === 'Sat' || candidateWeekday === 'Sun') continue;
     nextDayName = candidateWeekday;
-    found = true;
     break;
   }
   const prettyDay = {
@@ -179,21 +160,21 @@ function humanReadableNextAvailability(coach, fromDate = new Date()) {
     Thu: 'Thursday',
     Fri: 'Friday',
     Sat: 'Saturday',
-  }[nextDayName || 'Mon'];
+  }[nextDayName || 'Monday'];
   const nextWindow = schedule[0];
   const timeStr = formatETTimeFromParts(nextWindow.start);
   return `${prettyDay} at ${timeStr}`;
 }
 
 function coachIsActiveNow(coach, date = new Date()) {
-  if (isWeekendET(date)) return false; // no one works weekends for purposes of "in-office"
+  if (isWeekendET(date)) return false;
   const etParts = getETParts(date);
   const nowMinutes = etParts.hour * 60 + etParts.minute;
   const schedule = coachHours[coach];
   for (const win of schedule) {
     let startMin = win.start.hour * 60 + (win.start.minute || 0);
     let endMin = win.end.hour * 60 + (win.end.minute || 0);
-    if (endMin === 0) endMin = 24 * 60; // midnight wrap
+    if (endMin === 0) endMin = 24 * 60;
     if (nowMinutes >= startMin && nowMinutes < endMin) {
       return true;
     }
@@ -202,7 +183,6 @@ function coachIsActiveNow(coach, date = new Date()) {
 }
 function todayDateEST() {
   const et = getETParts();
-  // Format YYYY-MM-DD from ET components
   const mm = String(et.month).padStart(2, '0');
   const dd = String(et.day).padStart(2, '0');
   return `${et.year}-${mm}-${dd}`;
@@ -266,9 +246,7 @@ async function buildAndSendSummaryForCoach(coach) {
   let studentIdx = 1;
   for (const [student, info] of Object.entries(byStudent)) {
     const firstSeenStr = formatEST(info.firstSeen);
-    const channelList = [...info.channels]
-      .map((c) => `#${c}`)
-      .join(', ');
+    const channelList = [...info.channels].map((c) => `#${c}`).join(', ');
     summaryText += `${studentIdx}. **${student}** (first at ${firstSeenStr} EST in ${channelList}):\n`;
     const seenMsgs = new Set();
     for (const m of info.messages) {
@@ -424,16 +402,12 @@ async function safeReply(interaction, options) {
   }
 }
 
-// ---- Ready & command registration ----
+// ---- Ready & register commands ----
 client.once(Events.ClientReady, async () => {
   console.log(`🤖 Discord bot logged in as ${client.user.tag}`);
   try {
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
-      body: [
-        queueCommand.toJSON(),
-        clearEntryCommand.toJSON(),
-        clearAllCommand.toJSON(),
-      ],
+      body: [queueCommand.toJSON(), clearEntryCommand.toJSON(), clearAllCommand.toJSON()],
     });
     console.log('✅ Slash commands registered.');
   } catch (err) {
@@ -466,13 +440,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
     try {
       await interaction.deferReply({ flags: 64 });
       await buildAndSendSummaryForCoach(coach);
-      await safeReply(interaction, {
+      await interaction.editReply({
         content: `✅ Summary for **${coach}** sent.`,
         flags: 64,
       });
     } catch (err) {
       console.error('❌ Error fetching queue:', err);
-      await safeReply(interaction, {
+      await interaction.editReply({
         content: 'There was an error fetching the queue.',
         flags: 64,
       });
@@ -503,7 +477,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         })
         .all();
       if (records.length === 0) {
-        await safeReply(interaction, {
+        await interaction.editReply({
           content: `ℹ️ No queue entries found for **${student}** under **${coach}** today.`,
         });
         return;
@@ -512,7 +486,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       for (let i = 0; i < ids.length; i += 10) {
         await queueTable.destroy(ids.slice(i, i + 10));
       }
-      await safeReply(interaction, {
+      await interaction.editReply({
         content: `🗑️ Cleared ${records.length} entr${records.length === 1 ? 'y' : 'ies'} for **${student}** under **${coach}** today.`,
       });
     } catch (err) {
@@ -556,7 +530,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         })
         .all();
       if (records.length === 0) {
-        await safeReply(interaction, {
+        await interaction.editReply({
           content: `ℹ️ No queue entries to clear for **${coach}**.`,
         });
         return;
@@ -565,7 +539,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       for (let i = 0; i < ids.length; i += 10) {
         await queueTable.destroy(ids.slice(i, i + 10));
       }
-      await safeReply(interaction, {
+      await interaction.editReply({
         content: `🗑️ Cleared all (${records.length}) queue entr${records.length === 1 ? 'y' : 'ies'} for **${coach}** (all dates).`,
       });
     } catch (err) {
