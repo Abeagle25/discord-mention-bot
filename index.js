@@ -22,7 +22,7 @@ const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME;
 const SUMMARY_CHANNEL_ID = process.env.SUMMARY_CHANNEL_ID;
-const REQUIRED_ROLE_ID = process.env.REQUIRED_ROLE_ID; // role gate for slash commands
+const REQUIRED_ROLE_ID = process.env.REQUIRED_ROLE_ID;
 const PORT = process.env.PORT || 3000;
 const SELF_PING_URL =
   process.env.SELF_PING_URL || `https://${process.env.RENDER_EXTERNAL_URL || ''}`;
@@ -30,7 +30,9 @@ const SELF_PING_URL =
 // ---- Debug / sanity ----
 console.log(`Using DISCORD_TOKEN: ${DISCORD_TOKEN ? '✅ Set' : '❌ Not Set'}`);
 console.log(`Using CLIENT_ID: ${CLIENT_ID ? '✅ Set' : '❌ Not Set'}`);
-console.log(`Using GUILD_ID: ${GUILD_ID ? '✅ Set' : '❌ Not Set'}`);
+console.log(
+  `Using GUILD_ID: ${GUILD_ID ? '✅ Set' : '❌ Not Set'}`
+);
 console.log(
   `Using AIRTABLE_TABLE_NAME: ${AIRTABLE_TABLE_NAME || '❌ Not Set'}`
 );
@@ -47,25 +49,22 @@ if (AIRTABLE_API_KEY && AIRTABLE_BASE_ID && AIRTABLE_TABLE_NAME) {
   const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
   queueTable = base(AIRTABLE_TABLE_NAME);
 } else {
-  console.warn(
-    '⚠️ Airtable configuration incomplete; queue will not work.'
-  );
+  console.warn('⚠️ Airtable configuration incomplete; queue will not work.');
 }
 
 // ---- Coaches config ----
-// Active hours per coach (EST)
+// Active windows per coach in EST
 const coachHours = {
-  Jeika: { start: { hour: 10, minute: 0 }, end: { hour: 15, minute: 0 } }, // 10AM–3PM
-  Tugce: { start: { hour: 8, minute: 0 }, end: { hour: 18, minute: 0 } }, // 8AM–6PM
-  Sandro: { start: { hour: 6, minute: 0 }, end: { hour: 16, minute: 0 } }, // 6AM–4PM
-  Divine: { start: { hour: 8, minute: 0 }, end: { hour: 17, minute: 0 } }, // 8AM–5PM
-  Phil: { start: { hour: 8, minute: 0 }, end: { hour: 16, minute: 0 } }, // 8AM–4PM
+  Jeika: [{ start: { hour: 10, minute: 0 }, end: { hour: 15, minute: 0 } }], // 10AM–3PM
+  Tugce: [{ start: { hour: 8, minute: 0 }, end: { hour: 18, minute: 0 } }], // 8AM–6PM
+  Sandro: [{ start: { hour: 6, minute: 0 }, end: { hour: 16, minute: 0 } }], // 6AM–4PM
+  Divine: [{ start: { hour: 8, minute: 0 }, end: { hour: 17, minute: 0 } }], // 8AM–5PM
+  Phil: [{ start: { hour: 8, minute: 0 }, end: { hour: 16, minute: 0 } }], // 8AM–4PM
   Michael: [
     { start: { hour: 9, minute: 0 }, end: { hour: 13, minute: 0 } }, // 9AM-1PM
-    { start: { hour: 20, minute: 0 }, end: { hour: 0, minute: 0 } }, // 8PM-12AM (midnight)
+    { start: { hour: 20, minute: 0 }, end: { hour: 0, minute: 0 } }, // 8PM-midnight
   ],
 };
-// Discord IDs for tagging / authorization
 const coachDiscordIds = {
   Jeika: '852485920023117854',
   Tugce: '454775533671284746',
@@ -76,108 +75,146 @@ const coachDiscordIds = {
 };
 
 // ---- Reminder tracking ----
-const reminderSent = {}; // { coachName: 'YYYY-MM-DD' }
+const reminderSent = {}; // per coach per day
 
 // ---- Deduplication sets ----
 const processingMessages = new Set();
-const repliedToday = new Map(); // key `${coach}-${username}-${date}` to limit one reply per coach-user per day
+const repliedToday = new Map(); // key `${coach}-${userId}-${date}`
 
-// ---- Time helpers (EST) ----
-function getESTNow() {
-  const now = new Date();
-  const estString = now.toLocaleString('en-US', {
+// ---- Time helpers (ET) ----
+function getETParts(date = new Date()) {
+  // returns object with year, month (1-12), day, hour (0-23), minute, weekday (0=Sunday)
+  const fmt = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    weekday: 'short',
   });
-  return new Date(estString);
+  const parts = fmt.formatToParts(date);
+  const extract = {};
+  for (const p of parts) {
+    if (p.type === 'year') extract.year = parseInt(p.value, 10);
+    if (p.type === 'month') extract.month = parseInt(p.value, 10);
+    if (p.type === 'day') extract.day = parseInt(p.value, 10);
+    if (p.type === 'hour') extract.hour = parseInt(p.value, 10);
+    if (p.type === 'minute') extract.minute = parseInt(p.value, 10);
+    if (p.type === 'weekday') extract.weekday = p.value; // e.g., "Mon"
+  }
+  return extract; // weekday like "Mon", "Tue"
+}
+function isWeekendET(date = new Date()) {
+  const etParts = getETParts(date);
+  // we can map weekday abbreviation
+  return etParts.weekday === 'Sat' || etParts.weekday === 'Sun';
+}
+function formatETTimeFromParts({ hour, minute }) {
+  // build a dummy Date in ET timezone just for formatting: use today's date and replace hour/minute, then format with Intl
+  const now = new Date();
+  const etParts = getETParts(now);
+  // Construct a string "YYYY-MM-DDTHH:MM:00" in ET and convert to a Date by interpreting as ET via locale formatting hack:
+  // Simpler: format manually to 12-hour
+  let h12 = hour % 12;
+  if (h12 === 0) h12 = 12;
+  const ampm = hour >= 12 ? 'PM' : 'AM';
+  const mm = String(minute).padStart(2, '0');
+  return `${h12}:${mm} ${ampm}`;
+}
+function humanReadableNextAvailability(coach, fromDate = new Date()) {
+  // returns string like "Monday at 6:00 AM" or "6:00 AM" if same ET day
+  const etNow = getETParts(fromDate);
+  const todayWeekday = etNow.weekday; // e.g., "Fri"
+  const schedule = coachHours[coach]; // array of windows
+  // Helper to compare time in minutes
+  const nowMinutes = etNow.hour * 60 + etNow.minute;
+
+  function minutes(t) {
+    return t.hour * 60 + (t.minute || 0);
+  }
+
+  // If weekend, jump to next Monday's first start
+  const weekdayOrder = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const isWeekend = todayWeekday === 'Sat' || todayWeekday === 'Sun';
+  if (isWeekend) {
+    // find next Monday
+    let offsetDays = 0;
+    if (todayWeekday === 'Sat') offsetDays = 2;
+    if (todayWeekday === 'Sun') offsetDays = 1;
+    // choose first window of next workday
+    const nextWindow = schedule[0];
+    const timeStr = formatETTimeFromParts(nextWindow.start);
+    return `Monday at ${timeStr}`;
+  }
+
+  // Check if before any window today
+  for (const win of schedule) {
+    const startMin = minutes(win.start);
+    if (nowMinutes < startMin) {
+      // upcoming today
+      const timeStr = formatETTimeFromParts(win.start);
+      return `${timeStr}`;
+    }
+  }
+
+  // After all windows today: roll to next workday (skip weekend)
+  let currentIndex = weekdayOrder.indexOf(todayWeekday);
+  let found = false;
+  let nextDayName = '';
+  for (let i = 1; i <= 7; i++) {
+    const candidateIdx = (currentIndex + i) % 7;
+    const candidateWeekday = weekdayOrder[candidateIdx];
+    if (candidateWeekday === 'Sat' || candidateWeekday === 'Sun') continue;
+    nextDayName = candidateWeekday;
+    found = true;
+    break;
+  }
+  const prettyDay = {
+    Sun: 'Sunday',
+    Mon: 'Monday',
+    Tue: 'Tuesday',
+    Wed: 'Wednesday',
+    Thu: 'Thursday',
+    Fri: 'Friday',
+    Sat: 'Saturday',
+  }[nextDayName || 'Mon'];
+  const nextWindow = schedule[0];
+  const timeStr = formatETTimeFromParts(nextWindow.start);
+  return `${prettyDay} at ${timeStr}`;
+}
+
+function coachIsActiveNow(coach, date = new Date()) {
+  if (isWeekendET(date)) return false; // no one works weekends for purposes of "in-office"
+  const etParts = getETParts(date);
+  const nowMinutes = etParts.hour * 60 + etParts.minute;
+  const schedule = coachHours[coach];
+  for (const win of schedule) {
+    let startMin = win.start.hour * 60 + (win.start.minute || 0);
+    let endMin = win.end.hour * 60 + (win.end.minute || 0);
+    if (endMin === 0) endMin = 24 * 60; // midnight wrap
+    if (nowMinutes >= startMin && nowMinutes < endMin) {
+      return true;
+    }
+  }
+  return false;
 }
 function todayDateEST() {
-  return getESTNow().toISOString().split('T')[0];
+  const et = getETParts();
+  // Format YYYY-MM-DD from ET components
+  const mm = String(et.month).padStart(2, '0');
+  const dd = String(et.day).padStart(2, '0');
+  return `${et.year}-${mm}-${dd}`;
 }
-// improved formatter: 12h with AM/PM
-function formatEST(dateOrIso) {
-  let d = typeof dateOrIso === 'string' ? new Date(dateOrIso) : dateOrIso;
-  return d.toLocaleTimeString('en-US', {
+function formatEST(isoOrDate) {
+  const d = typeof isoOrDate === 'string' ? new Date(isoOrDate) : isoOrDate;
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
     hour: 'numeric',
     minute: '2-digit',
     hour12: true,
-    timeZone: 'America/New_York',
-  });
-}
-function toMinutes(t) {
-  return t.hour * 60 + (t.minute || 0);
-}
-function isWeekend(date) {
-  const wd = date.getDay();
-  return wd === 0 || wd === 6; // Sunday=0, Saturday=6
-}
-function coachIsActiveNow(coach, estDate) {
-  const schedule = coachHours[coach];
-  const nowMin = estDate.getHours() * 60 + estDate.getMinutes();
-  if (Array.isArray(schedule)) {
-    return schedule.some(({ start, end }) => {
-      const startMin = toMinutes(start);
-      let endMin = toMinutes(end);
-      if (endMin === 0) endMin = 24 * 60; // handle midnight wrap
-      return nowMin >= startMin && nowMin < endMin;
-    });
-  } else {
-    const { start, end } = schedule;
-    const startMin = toMinutes(start);
-    let endMin = toMinutes(end);
-    if (endMin === 0) endMin = 24 * 60;
-    return nowMin >= startMin && nowMin < endMin;
-  }
-}
-// next availability: if today within or before window, return the next start; if after or weekend, roll forward to next working day's first start
-function getNextAvailability(coach, fromDate) {
-  const d = new Date(fromDate); // EST date
-  // if weekend, move to next Monday
-  function advanceToNextWorkday(date) {
-    const copy = new Date(date);
-    while (isWeekend(copy)) {
-      copy.setDate(copy.getDate() + 1);
-    }
-    return copy;
-  }
-
-  // get today's schedule entries normalized as array
-  const schedule = Array.isArray(coachHours[coach])
-    ? coachHours[coach]
-    : [coachHours[coach]];
-
-  // if weekend, jump to next workday at its first start
-  if (isWeekend(d)) {
-    const nextWorkday = advanceToNextWorkday(d);
-    const firstStart = schedule[0].start;
-    nextWorkday.setHours(firstStart.hour, firstStart.minute || 0, 0, 0);
-    return nextWorkday;
-  }
-
-  // check each window for today
-  const nowMin = d.getHours() * 60 + d.getMinutes();
-  for (const { start, end } of schedule) {
-    const startMin = toMinutes(start);
-    let endMin = toMinutes(end);
-    if (endMin === 0) endMin = 24 * 60;
-    if (nowMin < startMin) {
-      // before this window starts today
-      const next = new Date(d);
-      next.setHours(start.hour, start.minute || 0, 0, 0);
-      return next;
-    }
-    if (nowMin >= startMin && nowMin < endMin) {
-      // currently in window: next availability is now (shouldn't be used for out-of-office)
-      return d;
-    }
-  }
-
-  // after all windows today: find next day that is not weekend
-  const tomorrow = new Date(d);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const nextWorkday = advanceToNextWorkday(tomorrow);
-  const firstStart = schedule[0].start;
-  nextWorkday.setHours(firstStart.hour, firstStart.minute || 0, 0, 0);
-  return nextWorkday;
+  }).format(d);
 }
 
 // ---- Express for health / manual summary ----
@@ -229,7 +266,9 @@ async function buildAndSendSummaryForCoach(coach) {
   let studentIdx = 1;
   for (const [student, info] of Object.entries(byStudent)) {
     const firstSeenStr = formatEST(info.firstSeen);
-    const channelList = [...info.channels].map((c) => `#${c}`).join(', ');
+    const channelList = [...info.channels]
+      .map((c) => `#${c}`)
+      .join(', ');
     summaryText += `${studentIdx}. **${student}** (first at ${firstSeenStr} EST in ${channelList}):\n`;
     const seenMsgs = new Set();
     for (const m of info.messages) {
@@ -249,9 +288,7 @@ async function buildAndSendSummaryForCoach(coach) {
 }
 
 app.get('/run-summary-now', async (req, res) => {
-  const today = todayDateEST();
   if (!queueTable) return res.status(500).send('Queue table not configured.');
-
   try {
     for (const coach of Object.keys(coachDiscordIds)) {
       await buildAndSendSummaryForCoach(coach);
@@ -265,16 +302,18 @@ app.get('/run-summary-now', async (req, res) => {
 
 app.listen(PORT, () => console.log(`🌐 HTTP server listening on port ${PORT}`));
 
-// ---- Self-ping to stay awake ----
+// ---- Self-ping ----
 setInterval(() => {
   if (SELF_PING_URL) {
     fetch(SELF_PING_URL)
       .then(() => console.log('🔁 Self-ping successful'))
-      .catch((err) => console.error('❌ Self-ping failed:', err.message));
+      .catch((err) =>
+        console.error('❌ Self-ping failed:', err.message)
+      );
   } else {
     console.warn('⚠️ SELF_PING_URL / RENDER_EXTERNAL_URL not set');
   }
-}, 180000); // every 3 minutes
+}, 180000);
 
 // ---- Discord client ----
 const client = new Client({
@@ -282,7 +321,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers, // for role gating
+    GatewayIntentBits.GuildMembers,
   ],
 });
 
@@ -290,7 +329,7 @@ const client = new Client({
 client.on('error', (e) => console.error('Discord client error:', e));
 client.on('shardError', (e) => console.error('Shard error:', e));
 
-// ---- Slash commands setup ----
+// ---- Slash commands ----
 const queueCommand = new SlashCommandBuilder()
   .setName('queue')
   .setDescription("View who's in the queue for a coach (with per-student summary)")
@@ -356,7 +395,7 @@ const clearAllCommand = new SlashCommandBuilder()
 
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
-// ---- Role check helper ----
+// ---- Role gating helper ----
 async function memberHasRequiredRole(interaction) {
   if (!REQUIRED_ROLE_ID) return false;
   let member = interaction.member;
@@ -373,7 +412,6 @@ async function memberHasRequiredRole(interaction) {
   return member.roles.cache.has(REQUIRED_ROLE_ID);
 }
 
-// ---- Safe reply utility ----
 async function safeReply(interaction, options) {
   try {
     if (interaction.replied || interaction.deferred) {
@@ -386,11 +424,10 @@ async function safeReply(interaction, options) {
   }
 }
 
-// ---- Ready & register commands ----
+// ---- Ready & command registration ----
 client.once(Events.ClientReady, async () => {
   console.log(`🤖 Discord bot logged in as ${client.user.tag}`);
   try {
-    console.log('🔁 Registering slash commands...');
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
       body: [
         queueCommand.toJSON(),
@@ -407,7 +444,6 @@ client.once(Events.ClientReady, async () => {
 // ---- Interaction handler ----
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-
   const today = todayDateEST();
 
   if (!(await memberHasRequiredRole(interaction))) {
@@ -542,14 +578,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// ---- Mention / queue logic ----
+// ---- Mention / queuing logic ----
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
 
-  // dedupe processing per message
   if (processingMessages.has(message.id)) return;
   processingMessages.add(message.id);
-  setTimeout(() => processingMessages.delete(message.id), 2 * 60 * 1000); // cleanup after 2m
+  setTimeout(() => processingMessages.delete(message.id), 2 * 60 * 1000); // cleanup
 
   console.log(`[MSG] ${message.author.username}: ${message.content}`);
 
@@ -558,22 +593,21 @@ client.on(Events.MessageCreate, async (message) => {
   );
   if (!mentionedCoach) return;
 
-  // if already replied today for this coach-user pair, skip (to avoid spam)
   const todayKey = `${mentionedCoach}-${message.author.id}-${todayDateEST()}`;
-  if (repliedToday.has(todayKey)) return;
+  if (repliedToday.has(todayKey)) return; // one friendly reply per coach-user per ET day
 
-  const nowEST = getESTNow();
-
+  const now = new Date();
+  const active = coachIsActiveNow(mentionedCoach, now);
   console.log(
-    `[CHECK] Mentioned coach=${mentionedCoach}, EST time=${formatEST(
-      nowEST
-    )}, active now=${coachIsActiveNow(mentionedCoach, nowEST)}`
+    `[CHECK] Mentioned coach=${mentionedCoach}, ET time=${formatEST(
+      now
+    )}, in-office=${active}`
   );
 
-  // In-office: do nothing except log
-  if (coachIsActiveNow(mentionedCoach, nowEST) && !isWeekend(nowEST)) {
+  // In-office hours: do nothing except log
+  if (active) {
     console.log(
-      `[INFO] Mention of ${message.author.username} for ${mentionedCoach} during their working hours; no queueing or reply.`
+      `[INFO] Mention of ${message.author.username} for ${mentionedCoach} during their working hours; skipping queueing/reply.`
     );
     return;
   }
@@ -587,9 +621,7 @@ client.on(Events.MessageCreate, async (message) => {
   const username = message.author.username;
 
   try {
-    // upsert queue entry for out-of-office mention
     const filter = `AND({Mentioned} = "${mentionedCoach}", {User} = "${username}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`;
-
     const existing = await queueTable
       .select({
         filterByFormula: filter,
@@ -601,7 +633,7 @@ client.on(Events.MessageCreate, async (message) => {
       const created = await queueTable.create({
         User: username,
         Mentioned: mentionedCoach,
-        Timestamp: nowEST.toISOString(),
+        Timestamp: now.toISOString(),
         Message: message.content,
         Channel: message.channel?.name || 'Unknown',
       });
@@ -623,29 +655,11 @@ client.on(Events.MessageCreate, async (message) => {
       );
     }
 
-    // compute next availability (rolls weekends to Monday)
-    const nextAvail = getNextAvailability(mentionedCoach, nowEST);
-    const isSameDay =
-      nextAvail.toDateString() === nowEST.toDateString() && !isWeekend(nowEST);
-    let backAtStr = '';
-    if (isSameDay) {
-      backAtStr = `${formatEST(nextAvail)}`; // e.g., "6:00 AM"
-    } else {
-      const dayNames = [
-        'Sunday',
-        'Monday',
-        'Tuesday',
-        'Wednesday',
-        'Thursday',
-        'Friday',
-        'Saturday',
-      ];
-      backAtStr = `${dayNames[nextAvail.getDay()]} at ${formatEST(
-        nextAvail
-      )}`; // e.g., "Monday at 6:00 AM"
-    }
-
-    const replyMessage = `Thank you for your message! Coach ${mentionedCoach} is currently out of office and will be back at ${backAtStr} EST. Don’t worry—I’ll make sure you’re on their radar when they return.`;
+    const nextAvailStr = humanReadableNextAvailability(
+      mentionedCoach,
+      now
+    );
+    const replyMessage = `Thank you for your message! Coach ${mentionedCoach} is currently out of office and will be back at ${nextAvailStr} EST. Don’t worry—I’ll make sure you’re on their radar when they return.`;
 
     await message.reply({
       content: replyMessage,
@@ -653,7 +667,7 @@ client.on(Events.MessageCreate, async (message) => {
     });
     repliedToday.set(todayKey, true);
     console.log(
-      `Queued: ${username} for ${mentionedCoach}; replied with availability ${backAtStr} EST`
+      `Queued: ${username} for ${mentionedCoach}; replied with availability ${nextAvailStr} EST`
     );
   } catch (err) {
     console.error('❌ Error handling mention:', err);
@@ -666,9 +680,7 @@ cron.schedule(
   async () => {
     const today = todayDateEST();
     if (!queueTable) return;
-
     console.log('🕗 Running daily summary job for', today);
-
     try {
       for (const coach of Object.keys(coachDiscordIds)) {
         await buildAndSendSummaryForCoach(coach);
