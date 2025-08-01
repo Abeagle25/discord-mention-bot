@@ -22,7 +22,7 @@ const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME;
 const SUMMARY_CHANNEL_ID = process.env.SUMMARY_CHANNEL_ID;
-const REQUIRED_ROLE_ID = process.env.REQUIRED_ROLE_ID;
+const REQUIRED_ROLE_ID = process.env.REQUIRED_ROLE_ID; // e.g., 1176961256029171773
 const PORT = process.env.PORT || 3000;
 const SELF_PING_URL =
   process.env.SELF_PING_URL || `https://${process.env.RENDER_EXTERNAL_URL || ''}`;
@@ -42,9 +42,11 @@ console.log(
 );
 
 // ---- Airtable setup ----
-let queueTable = null;
+let queueTable: any = null;
 if (AIRTABLE_API_KEY && AIRTABLE_BASE_ID && AIRTABLE_TABLE_NAME) {
-  const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
+  const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(
+    AIRTABLE_BASE_ID
+  );
   queueTable = base(AIRTABLE_TABLE_NAME);
 } else {
   console.warn(
@@ -52,28 +54,42 @@ if (AIRTABLE_API_KEY && AIRTABLE_BASE_ID && AIRTABLE_TABLE_NAME) {
   );
 }
 
-// ---- Coaches config (example from before, adjust if needed) ----
-// Active hours per coach (EST)
-const coachHours = {
-  Jeika: { start: { hour: 10, minute: 0 }, end: { hour: 15, minute: 0 } }, // 10AM–3PM EST
-  Tugce: { start: { hour: 8, minute: 0 }, end: { hour: 18, minute: 0 } }, // 8AM–6PM EST
-  Sandro: { start: { hour: 6, minute: 0 }, end: { hour: 16, minute: 0 } }, // 6AM–4PM EST
-  Alim: { start: { hour: 8, minute: 30 }, end: { hour: 19, minute: 0 } }, // legacy, keep or remove as desired
+// ---- Coaches config ----
+// Active hours per coach (EST). Allow multiple windows for people like Michael.
+const coachHours: Record<
+  string,
+  Array<{ start: { hour: number; minute?: number }; end: { hour: number; minute?: number } }>
+> = {
+  Jeika: [{ start: { hour: 10, minute: 0 }, end: { hour: 15, minute: 0 } }], // 10AM–3PM EST
+  Tugce: [{ start: { hour: 8, minute: 0 }, end: { hour: 18, minute: 0 } }], // 8AM–6PM EST
+  Sandro: [{ start: { hour: 6, minute: 0 }, end: { hour: 16, minute: 0 } }], // 6AM–4PM EST
+  Michael: [
+    { start: { hour: 9, minute: 0 }, end: { hour: 13, minute: 0 } }, // 9AM-1PM
+    { start: { hour: 20, minute: 0 }, end: { hour: 24, minute: 0 } }, // 8PM-12AM (represented as 24)
+  ],
+  Divine: [{ start: { hour: 8, minute: 0 }, end: { hour: 17, minute: 0 } }], // 8AM–5PM
+  Phil: [{ start: { hour: 8, minute: 0 }, end: { hour: 16, minute: 0 } }], // 8AM–4PM
 };
 // Discord IDs for tagging / authorization
-const coachDiscordIds = {
+const coachDiscordIds: Record<string, string> = {
   Jeika: '852485920023117854',
   Tugce: '454775533671284746',
   Sandro: '814382156633079828',
-  Alim: '1013886202266521751',
+  Michael: '673171818437279755',
+  Divine: '692545355849400320',
+  Phil: '1058164184292016148',
 };
 
-// ---- Reminder tracking ----
-const reminderSent = {}; // { coachName: 'YYYY-MM-DD' }
+// ---- State tracking ----
+const reminderSent: Record<string, string> = {}; // per-coach date for end-of-day reminder
+const queueEnabled: Record<string, boolean> = {}; // per-coach toggle, default true
+const friendlyReplied: Record<string, Record<string, string>> = {}; // coach -> user -> date
 
-// ---- Deduplication sets ----
-const processingMessages = new Set();
-const repliedMentions = new Set();
+// initialize defaults
+for (const coach of Object.keys(coachDiscordIds)) {
+  queueEnabled[coach] = true;
+  friendlyReplied[coach] = {};
+}
 
 // ---- Time helpers (EST) ----
 function getESTNow() {
@@ -86,7 +102,7 @@ function getESTNow() {
 function todayDateEST() {
   return getESTNow().toISOString().split('T')[0];
 }
-function formatEST(iso) {
+function formatEST(iso: string | null | undefined) {
   if (!iso) return 'unknown';
   try {
     const d = new Date(iso);
@@ -94,92 +110,111 @@ function formatEST(iso) {
       hour: '2-digit',
       minute: '2-digit',
       timeZone: 'America/New_York',
+      hour12: true,
     });
   } catch {
     return iso;
   }
 }
-function toMinutes(t) {
-  return t.hour * 60 + (t.minute || 0);
+function pad2(n: number) {
+  return n.toString().padStart(2, '0');
 }
-function isWithinCoachHours(coach, estDate) {
+function inWindow(
+  estDate: Date,
+  window: { start: { hour: number; minute?: number }; end: { hour: number; minute?: number } }
+) {
   const nowMin = estDate.getHours() * 60 + estDate.getMinutes();
-  const { start, end } = coachHours[coach];
-  const startMin = toMinutes(start);
-  const endMin = toMinutes(end);
+  const startMin =
+    window.start.hour * 60 + (window.start.minute || 0);
+  let endHour = window.end.hour;
+  // handle end=24 as midnight boundary
+  if (endHour === 24) endHour = 0;
+  const endMin = endHour * 60 + (window.end.minute || 0);
+  if (window.end.hour === 24) {
+    // treat as until end of day
+    return nowMin >= startMin && nowMin < 24 * 60;
+  }
   return nowMin >= startMin && nowMin < endMin;
 }
-function isWeekendEST(date = getESTNow()) {
-  const dow = date.getDay(); // 0 Sunday, 6 Saturday
-  return dow === 0 || dow === 6;
+function isWithinCoachHours(coach: string, estDate: Date) {
+  const windows = coachHours[coach] || [];
+  return windows.some((w) => inWindow(estDate, w));
 }
-function formatHourMin(t) {
-  // t is {hour, minute}
-  const d = new Date();
-  d.setHours(t.hour);
-  d.setMinutes(t.minute || 0);
-  return d.toLocaleTimeString('en-US', {
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone: 'America/New_York',
-  });
+function isWeekendEST(date: Date) {
+  const day = date.getDay(); // 0 Sunday, 6 Saturday
+  return day === 0 || day === 6;
 }
-/**
- * Returns the next availability string (e.g., "Monday at 10:00 AM EST" or "today at 10:00 AM EST")
- */
-function getNextAvailability(coach, estDate = getESTNow()) {
-  // If weekend, roll to next Monday
-  const isWeekend = isWeekendEST(estDate);
-  const coachWindow = coachHours[coach];
-  if (!coachWindow) return 'unknown';
+function getNextAvailability(coach: string, fromDate: Date) {
+  // returns human string like "10:00 AM" or "Monday at 10:00 AM"
+  const estNow = new Date(fromDate);
+  const dayNames = [
+    'Sunday',
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday',
+    'Saturday',
+  ];
 
-  if (isWeekend) {
-    // compute coming Monday
-    const day = estDate.getDay();
-    const daysToAdd = day === 6 ? 2 : day === 0 ? 1 : 0; // Saturday -> Monday (+2), Sunday -> Monday (+1)
-    const nextMonday = new Date(estDate);
-    nextMonday.setDate(estDate.getDate() + daysToAdd);
-    const startStr = formatHourMin(coachWindow.start);
-    const weekday = nextMonday.toLocaleDateString('en-US', {
-      weekday: 'long',
+  // Helper to format a window start
+  const fmtStart = (windowStart: {
+    hour: number;
+    minute?: number;
+  }) => {
+    const h = windowStart.hour % 24;
+    const m = windowStart.minute || 0;
+    const date = new Date(estNow);
+    date.setHours(h, m, 0, 0);
+    return date.toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
       timeZone: 'America/New_York',
     });
-    return `${weekday} at ${startStr}`;
-  }
+  };
 
-  // Weekday: if still before start, it's today at start; if after end, it's tomorrow (skipping weekend) at start
-  const nowMin = estDate.getHours() * 60 + estDate.getMinutes();
-  const startMin = toMinutes(coachWindow.start);
-  const endMin = toMinutes(coachWindow.end);
+  // Search today first
+  const windowsToday = coachHours[coach] || [];
+  const nowMinutes = estNow.getHours() * 60 + estNow.getMinutes();
 
-  if (nowMin < startMin) {
-    return `today at ${formatHourMin(coachWindow.start)}`;
-  } else if (nowMin >= endMin) {
-    // next day: if next day is weekend, bump to Monday
-    const next = new Date(estDate);
-    next.setDate(estDate.getDate() + 1);
-    if (isWeekendEST(next)) {
-      // find following Monday
-      const dow = next.getDay();
-      const add = dow === 6 ? 2 : dow === 0 ? 1 : 0;
-      next.setDate(next.getDate() + add);
+  for (const w of windowsToday) {
+    const startMin = (w.start.hour % 24) * 60 + (w.start.minute || 0);
+    if (nowMinutes < startMin) {
+      // later today
+      return fmtStart(w.start);
     }
-    const weekday = next.toLocaleDateString('en-US', {
-      weekday: 'long',
-      timeZone: 'America/New_York',
-    });
-    return `${weekday} at ${formatHourMin(coachWindow.start)}`;
-  } else {
-    // currently within hours
-    return `now`;
   }
+
+  // Next day (skip weekend if today is weekend or target is weekend? availability is defined even on weekdays)
+  for (let offset = 1; offset <= 7; offset++) {
+    const candidate = new Date(estNow);
+    candidate.setDate(estNow.getDate() + offset);
+    // skip weekends
+    const day = candidate.getDay();
+    if (day === 0 || day === 6) continue;
+
+    const windows = coachHours[coach] || [];
+    if (windows.length === 0) continue;
+    // take earliest window
+    const firstWindow = windows[0];
+    const timeStr = fmtStart(firstWindow.start);
+    if (offset === 1) {
+      return `${dayNames[candidate.getDay()]} at ${timeStr}`;
+    } else {
+      return `${dayNames[candidate.getDay()]} at ${timeStr}`;
+    }
+  }
+
+  // Fallback: unknown
+  return 'unknown';
 }
 
 // ---- Express for health / manual summary ----
 const app = express();
 app.get('/', (_, res) => res.send('Bot is running!'));
 
-async function buildAndSendSummaryForCoach(coach) {
+async function buildAndSendSummaryForCoach(coach: string) {
   const today = todayDateEST();
   if (!queueTable) return;
   const records = await queueTable
@@ -190,8 +225,16 @@ async function buildAndSendSummaryForCoach(coach) {
     .all();
   if (records.length === 0) return;
 
-  const byStudent = {};
-  records.forEach((r) => {
+  const byStudent: Record<
+    string,
+    {
+      firstSeen: string;
+      channels: Set<string>;
+      messages: Array<{ text: string; timestamp: string; channel: string }>;
+    }
+  > = {};
+
+  records.forEach((r: any) => {
     const user = r.get('User') || 'Unknown';
     const msg = r.get('Message') || '';
     const channel = r.get('Channel') || 'Unknown';
@@ -224,9 +267,11 @@ async function buildAndSendSummaryForCoach(coach) {
   let studentIdx = 1;
   for (const [student, info] of Object.entries(byStudent)) {
     const firstSeenStr = formatEST(info.firstSeen);
-    const channelList = [...info.channels].map((c) => `#${c}`).join(', ');
+    const channelList = [...info.channels]
+      .map((c) => `#${c}`)
+      .join(', ');
     summaryText += `${studentIdx}. **${student}** (first at ${firstSeenStr} EST in ${channelList}):\n`;
-    const seenMsgs = new Set();
+    const seenMsgs = new Set<string>();
     for (const m of info.messages) {
       const timeStr = formatEST(m.timestamp);
       const key = `${m.text}||${m.channel}||${timeStr}`;
@@ -244,9 +289,6 @@ async function buildAndSendSummaryForCoach(coach) {
 }
 
 app.get('/run-summary-now', async (req, res) => {
-  const today = todayDateEST();
-  if (!queueTable) return res.status(500).send('Queue table not configured.');
-
   try {
     for (const coach of Object.keys(coachDiscordIds)) {
       await buildAndSendSummaryForCoach(coach);
@@ -255,6 +297,7 @@ app.get('/run-summary-now', async (req, res) => {
   } catch (err) {
     console.error('❌ Manual summary error:', err);
     res.status(500).send('Failed to send summary.');
+    res.status(500).end();
   }
 });
 
@@ -267,7 +310,9 @@ setInterval(() => {
   if (SELF_PING_URL) {
     fetch(SELF_PING_URL)
       .then(() => console.log('🔁 Self-ping successful'))
-      .catch((err) => console.error('❌ Self-ping failed:', err.message));
+      .catch((err) =>
+        console.error('❌ Self-ping failed:', (err as Error).message)
+      );
   } else {
     console.warn('⚠️ SELF_PING_URL / RENDER_EXTERNAL_URL not set');
   }
@@ -279,7 +324,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMembers, // required to read roles for gating
   ],
 });
 
@@ -300,7 +345,9 @@ const queueCommand = new SlashCommandBuilder()
         { name: 'Jeika', value: 'Jeika' },
         { name: 'Tugce', value: 'Tugce' },
         { name: 'Sandro', value: 'Sandro' },
-        { name: 'Alim', value: 'Alim' }
+        { name: 'Michael', value: 'Michael' },
+        { name: 'Divine', value: 'Divine' },
+        { name: 'Phil', value: 'Phil' }
       )
   );
 
@@ -316,7 +363,9 @@ const clearEntryCommand = new SlashCommandBuilder()
         { name: 'Jeika', value: 'Jeika' },
         { name: 'Tugce', value: 'Tugce' },
         { name: 'Sandro', value: 'Sandro' },
-        { name: 'Alim', value: 'Alim' }
+        { name: 'Michael', value: 'Michael' },
+        { name: 'Divine', value: 'Divine' },
+        { name: 'Phil', value: 'Phil' }
       )
   )
   .addStringOption((opt) =>
@@ -338,7 +387,9 @@ const clearAllCommand = new SlashCommandBuilder()
         { name: 'Jeika', value: 'Jeika' },
         { name: 'Tugce', value: 'Tugce' },
         { name: 'Sandro', value: 'Sandro' },
-        { name: 'Alim', value: 'Alim' }
+        { name: 'Michael', value: 'Michael' },
+        { name: 'Divine', value: 'Divine' },
+        { name: 'Phil', value: 'Phil' }
       )
   )
   .addBooleanOption((opt) =>
@@ -348,10 +399,14 @@ const clearAllCommand = new SlashCommandBuilder()
       .setRequired(true)
   );
 
+const toggleQueueCommand = new SlashCommandBuilder()
+  .setName('togglequeue')
+  .setDescription('Toggle your own queueing automation on/off');
+
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
 // ---- Role check helper ----
-async function memberHasRequiredRole(interaction) {
+async function memberHasRequiredRole(interaction: any) {
   if (!REQUIRED_ROLE_ID) return false;
   let member = interaction.member;
   if (!member || !member.roles || !member.roles.cache) {
@@ -368,14 +423,14 @@ async function memberHasRequiredRole(interaction) {
 }
 
 // ---- Safe reply utility ----
-async function safeReply(interaction, options) {
+async function safeReply(interaction: any, options: any) {
   try {
     if (interaction.replied || interaction.deferred) {
       await interaction.editReply(options);
     } else {
       await interaction.reply(options);
     }
-  } catch (e) {
+  } catch (e: any) {
     console.warn('⚠️ safeReply failure:', e.message);
   }
 }
@@ -384,11 +439,13 @@ async function safeReply(interaction, options) {
 client.once(Events.ClientReady, async () => {
   console.log(`🤖 Discord bot logged in as ${client.user.tag}`);
   try {
+    console.log('🔁 Registering slash commands...');
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
       body: [
         queueCommand.toJSON(),
         clearEntryCommand.toJSON(),
         clearAllCommand.toJSON(),
+        toggleQueueCommand.toJSON(),
       ],
     });
     console.log('✅ Slash commands registered.');
@@ -398,14 +455,15 @@ client.once(Events.ClientReady, async () => {
 });
 
 // ---- Interaction handler ----
-client.on(Events.InteractionCreate, async (interaction) => {
+client.on(Events.InteractionCreate, async (interaction: any) => {
   if (!interaction.isChatInputCommand()) return;
 
   const today = todayDateEST();
 
+  // role gating (for slash commands)
   if (!(await memberHasRequiredRole(interaction))) {
     await safeReply(interaction, {
-      content: `❌ You need the required role to use this command.`,
+      content: `❌ You need the Team Ambitious Labs role to use this command.`,
       flags: 64,
     });
     return;
@@ -446,6 +504,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
       return;
     }
+
     if (!queueTable) {
       await safeReply(interaction, {
         content: '⚠️ Queue table not configured properly.',
@@ -453,25 +512,32 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
       return;
     }
+
     try {
       await interaction.deferReply({ flags: 64 });
+
       const records = await queueTable
         .select({
           filterByFormula: `AND({Mentioned} = "${coach}", {User} = "${student}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
         })
         .all();
+
       if (records.length === 0) {
         await safeReply(interaction, {
           content: `ℹ️ No queue entries found for **${student}** under **${coach}** today.`,
         });
         return;
       }
-      const ids = records.map((r) => r.id);
+
+      const ids = records.map((r: any) => r.id);
       for (let i = 0; i < ids.length; i += 10) {
         await queueTable.destroy(ids.slice(i, i + 10));
       }
+
       await safeReply(interaction, {
-        content: `🗑️ Cleared ${records.length} entr${records.length === 1 ? 'y' : 'ies'} for **${student}** under **${coach}** today.`,
+        content: `🗑️ Cleared ${records.length} entr${
+          records.length === 1 ? 'y' : 'ies'
+        } for **${student}** under **${coach}** today.`,
       });
     } catch (err) {
       console.error('❌ Error clearing entry:', err);
@@ -492,6 +558,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
       return;
     }
+
     if (!confirm) {
       await safeReply(interaction, {
         content: `⚠️ This will remove *all* queue entries for **${coach}** (including prior days). If you’re sure, re-run with \`confirm: true\`.`,
@@ -499,6 +566,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
       return;
     }
+
     if (!queueTable) {
       await safeReply(interaction, {
         content: '⚠️ Queue table not configured properly.',
@@ -506,26 +574,33 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
       return;
     }
+
     try {
       await interaction.deferReply({ flags: 64 });
+
       const records = await queueTable
         .select({
           filterByFormula: `{Mentioned} = "${coach}"`,
           maxRecords: 1000,
         })
         .all();
+
       if (records.length === 0) {
         await safeReply(interaction, {
           content: `ℹ️ No queue entries to clear for **${coach}**.`,
         });
         return;
       }
-      const ids = records.map((r) => r.id);
+
+      const ids = records.map((r: any) => r.id);
       for (let i = 0; i < ids.length; i += 10) {
         await queueTable.destroy(ids.slice(i, i + 10));
       }
+
       await safeReply(interaction, {
-        content: `🗑️ Cleared all (${records.length}) queue entr${records.length === 1 ? 'y' : 'ies'} for **${coach}** (all dates).`,
+        content: `🗑️ Cleared all (${records.length}) queue entr${
+          records.length === 1 ? 'y' : 'ies'
+        } for **${coach}** (all dates).`,
       });
     } catch (err) {
       console.error('❌ Error clearing all entries:', err);
@@ -534,6 +609,36 @@ client.on(Events.InteractionCreate, async (interaction) => {
         flags: 64,
       });
     }
+  } else if (interaction.commandName === 'togglequeue') {
+    // Only the coach themselves may toggle their queue
+    const byId = Object.entries(coachDiscordIds).find(
+      ([_, id]) => id === interaction.user.id
+    );
+    if (!byId) {
+      await safeReply(interaction, {
+        content: `❌ Only a coach can toggle their own queueing state.`,
+        flags: 64,
+      });
+      return;
+    }
+    const coachName = byId[0];
+    queueEnabled[coachName] = !queueEnabled[coachName];
+    const status = queueEnabled[coachName] ? 'ENABLED' : 'DISABLED';
+    await safeReply(interaction, {
+      content: `✅ Your queueing automation is now **${status}**.`,
+      flags: 64,
+    });
+    // log to summary channel
+    try {
+      const summaryChannel = await client.channels.fetch(SUMMARY_CHANNEL_ID);
+      if (summaryChannel?.isTextBased?.()) {
+        await summaryChannel.send(
+          `<@${coachDiscordIds[coachName]}> has **${status}** their queueing automation.`
+        );
+      }
+    } catch (e) {
+      console.warn('Failed to log toggle to summary channel:', e);
+    }
   }
 });
 
@@ -541,143 +646,97 @@ client.on(Events.InteractionCreate, async (interaction) => {
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
 
-  if (processingMessages.has(message.id)) return;
-  processingMessages.add(message.id);
-  setTimeout(() => processingMessages.delete(message.id), 2 * 60 * 1000); // cleanup
-
-  console.log(`[MSG] ${message.author.username}: ${message.content}`);
-
   const mentionedCoach = Object.keys(coachDiscordIds).find((coach) =>
     message.mentions.users.has(coachDiscordIds[coach])
   );
   if (!mentionedCoach) return;
 
-  if (repliedMentions.has(message.id)) return;
-  // mark early
-  repliedMentions.add(message.id);
-
   const nowEST = getESTNow();
-  const today = todayDateEST();
-  const username = message.author.username;
 
+  // compute statuses
   const inOffice = isWithinCoachHours(mentionedCoach, nowEST);
   const weekend = isWeekendEST(nowEST);
   const nextAvail = getNextAvailability(mentionedCoach, nowEST);
+  const username = message.author.username;
 
-  // unified friendly out-of-office message (weekend or outside hours)
   const friendlyMessage = `Thank you for your message! Coach ${mentionedCoach} is currently out of office and will be back at ${nextAvail} EST. Don’t worry—I’ll make sure you’re on their radar when they return.`;
 
+  // only one friendly reply per coach-user per day
   try {
-    // always record the mention (even weekends) if outside their defined active window
-    if (!queueTable) {
-      console.warn('Airtable not configured; cannot queue.');
-      // still reply with friendly message
-      await message.reply(friendlyMessage);
-      return;
-    }
-
-    // If it's weekend OR outside their scheduled hours, queue but respond with friendly message.
-    if (weekend || !inOffice) {
-      // record to Airtable like normal (queue entry)
+    if (
+      weekend ||
+      !inOffice ||
+      !queueEnabled[mentionedCoach]
+    ) {
+      // should queue
+      const today = todayDateEST();
       const filter = `AND({Mentioned} = "${mentionedCoach}", {User} = "${username}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`;
-      const existing = await queueTable
-        .select({
-          filterByFormula: filter,
-          maxRecords: 1,
-        })
-        .firstPage();
-
-      if (existing.length === 0) {
-        await queueTable.create({
-          User: username,
-          Mentioned: mentionedCoach,
-          Timestamp: nowEST.toISOString(),
-          Message: message.content,
-          Channel: message.channel?.name || 'Unknown',
-        });
-        console.log(
-          `📥 New queue entry for ${username} -> ${mentionedCoach} (weekend/out-of-hours)`
-        );
-      } else {
-        const existingRecord = existing[0];
-        const prevMsg = existingRecord.get('Message') || '';
-        const updated = prevMsg
-          ? `${prevMsg}\n- ${message.content}`
-          : message.content;
-        await queueTable.update(existingRecord.id, {
-          Message: updated,
-          Channel: message.channel?.name || 'Unknown',
-        });
-        console.log(
-          `📝 Appended to existing queue entry for ${username} -> ${mentionedCoach} (weekend/out-of-hours)`
-        );
+      let existing: any[] = [];
+      if (queueTable) {
+        existing = await queueTable
+          .select({ filterByFormula: filter, maxRecords: 1 })
+          .firstPage();
       }
 
-      // friendly in-channel reply
-      await message.reply(friendlyMessage);
-      console.log(
-        `Replied out-of-office to ${username} for ${mentionedCoach} (next availability: ${nextAvail})`
-      );
-      return;
-    }
+      if (queueTable) {
+        if (existing.length === 0) {
+          await queueTable.create({
+            User: username,
+            Mentioned: mentionedCoach,
+            Timestamp: nowEST.toISOString(),
+            Message: message.content,
+            Channel: message.channel?.name || 'Unknown',
+          });
+          console.log(
+            `📥 New queue entry for ${username} -> ${mentionedCoach} (OOO/disabled)`
+          );
+        } else {
+          const existingRecord = existing[0];
+          const prevMsg = existingRecord.get('Message') || '';
+          const updated = prevMsg
+            ? `${prevMsg}\n- ${message.content}`
+            : message.content;
+          await queueTable.update(existingRecord.id, {
+            Message: updated,
+            Channel: message.channel?.name || 'Unknown',
+          });
+          console.log(
+            `📝 Appended to existing queue entry for ${username} -> ${mentionedCoach} (OOO/disabled)`
+          );
+        }
+      } else {
+        console.warn('Airtable not configured; cannot queue.');
+      }
 
-    // If here, coach is in office (within hours): normal queuing behavior
-    const filter = `AND({Mentioned} = "${mentionedCoach}", {User} = "${username}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`;
-    const existing = await queueTable
-      .select({
-        filterByFormula: filter,
-        maxRecords: 1,
-      })
-      .firstPage();
-
-    if (existing.length === 0) {
-      await queueTable.create({
-        User: username,
-        Mentioned: mentionedCoach,
-        Timestamp: nowEST.toISOString(),
-        Message: message.content,
-        Channel: message.channel?.name || 'Unknown',
-      });
-      console.log(
-        `📥 New queue entry for ${username} -> ${mentionedCoach} (in-office)`
-      );
+      const todayStr = todayDateEST();
+      const already = friendlyReplied[mentionedCoach]?.[username] === todayStr;
+      if (!already) {
+        await message.reply(friendlyMessage);
+        friendlyReplied[mentionedCoach][username] = todayStr;
+        console.log(
+          `Replied out-of-office to ${username} for ${mentionedCoach}`
+        );
+      } else {
+        console.log(
+          `Skipped duplicate friendly reply to ${username} for ${mentionedCoach}`
+        );
+      }
     } else {
-      const existingRecord = existing[0];
-      const prevMsg = existingRecord.get('Message') || '';
-      const updated = prevMsg
-        ? `${prevMsg}\n- ${message.content}`
-        : message.content;
-      await queueTable.update(existingRecord.id, {
-        Message: updated,
-        Channel: message.channel?.name || 'Unknown',
-      });
+      // In-office AND queue enabled: do nothing except log
       console.log(
-        `📝 Appended to existing queue entry for ${username} -> ${mentionedCoach} (in-office)`
+        `Mention during in-office for ${mentionedCoach} by ${username}; not queued.`
       );
     }
-
-    // position info is no longer needed per your earlier request, so just a short acknowledgement
-    await message.reply(
-      `Thanks for your message! Coach ${mentionedCoach} is currently in their normal workflow; I’ve recorded your mention and will surface it in the summary.`
-    );
-    console.log(`Queued: ${username} for ${mentionedCoach} (in-office)`);
   } catch (err) {
     console.error('❌ Error handling mention:', err);
   }
 });
 
-// ---- Daily summary at 8:00 AM EST (skip weekends) ----
+// ---- Daily summary at 8:00 AM EST ----
 cron.schedule(
   '0 8 * * *',
   async () => {
-    const nowEST = getESTNow();
     const today = todayDateEST();
-
-    if (isWeekendEST(nowEST)) {
-      console.log('⏸ Skipping daily summary on weekend:', today);
-      return;
-    }
-
     if (!queueTable) return;
 
     console.log('🕗 Running daily summary job for', today);
