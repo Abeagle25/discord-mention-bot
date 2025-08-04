@@ -32,18 +32,12 @@ console.log(`PID ${process.pid} starting up`);
 console.log(`Using DISCORD_TOKEN: ${DISCORD_TOKEN ? '✅ Set' : '❌ Not Set'}`);
 console.log(`Using CLIENT_ID: ${CLIENT_ID ? '✅ Set' : '❌ Not Set'}`);
 console.log(`Using GUILD_ID: ${GUILD_ID ? '✅ Set' : '❌ Not Set'}`);
-console.log(
-  `Using AIRTABLE_TABLE_NAME: ${AIRTABLE_TABLE_NAME || '❌ Not Set'}`
-);
-console.log(
-  `Using SUMMARY_CHANNEL_ID: ${SUMMARY_CHANNEL_ID ? '✅ Set' : '❌ Not Set'}`
-);
-console.log(
-  `Using REQUIRED_ROLE_ID: ${REQUIRED_ROLE_ID ? '✅ Set' : '❌ Not Set'}`
-);
+console.log(`Using AIRTABLE_TABLE_NAME: ${AIRTABLE_TABLE_NAME || '❌ Not Set'}`);
+console.log(`Using SUMMARY_CHANNEL_ID: ${SUMMARY_CHANNEL_ID ? '✅ Set' : '❌ Not Set'}`);
+console.log(`Using REQUIRED_ROLE_ID: ${REQUIRED_ROLE_ID ? '✅ Set' : '❌ Not Set'}`);
 
 // ---- Airtable setup ----
-let queueTable = null;
+let queueTable: any = null;
 if (AIRTABLE_API_KEY && AIRTABLE_BASE_ID && AIRTABLE_TABLE_NAME) {
   const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
   queueTable = base(AIRTABLE_TABLE_NAME);
@@ -53,18 +47,21 @@ if (AIRTABLE_API_KEY && AIRTABLE_BASE_ID && AIRTABLE_TABLE_NAME) {
 
 // ---- Coaches config ----
 // Active windows per coach in ET
-const coachHours = {
-  Jeika: [{ start: { hour: 10, minute: 0 }, end: { hour: 15, minute: 0 } }], // 10AM–3PM
-  Tugce: [{ start: { hour: 8, minute: 0 }, end: { hour: 18, minute: 0 } }], // 8AM–6PM
-  Sandro: [{ start: { hour: 6, minute: 0 }, end: { hour: 16, minute: 0 } }], // 6AM–4PM
-  Divine: [{ start: { hour: 8, minute: 0 }, end: { hour: 17, minute: 0 } }], // 8AM–5PM
-  Phil: [{ start: { hour: 8, minute: 0 }, end: { hour: 16, minute: 0 } }], // 8AM–4PM
+const coachHours: Record<
+  string,
+  Array<{ start: { hour: number; minute?: number }; end: { hour: number; minute?: number } }>
+> = {
+  Jeika: [{ start: { hour: 10, minute: 0 }, end: { hour: 15, minute: 0 } }],
+  Tugce: [{ start: { hour: 8, minute: 0 }, end: { hour: 18, minute: 0 } }],
+  Sandro: [{ start: { hour: 6, minute: 0 }, end: { hour: 16, minute: 0 } }],
+  Divine: [{ start: { hour: 8, minute: 0 }, end: { hour: 17, minute: 0 } }],
+  Phil: [{ start: { hour: 8, minute: 0 }, end: { hour: 16, minute: 0 } }],
   Michael: [
-    { start: { hour: 9, minute: 0 }, end: { hour: 13, minute: 0 } }, // 9AM-1PM
-    { start: { hour: 20, minute: 0 }, end: { hour: 0, minute: 0 } }, // 8PM-midnight
+    { start: { hour: 9, minute: 0 }, end: { hour: 13, minute: 0 } },
+    { start: { hour: 20, minute: 0 }, end: { hour: 0, minute: 0 } },
   ],
 };
-const coachDiscordIds = {
+const coachDiscordIds: Record<string, string> = {
   Jeika: '852485920023117854',
   Tugce: '454775533671284746',
   Sandro: '814382156633079828',
@@ -74,7 +71,7 @@ const coachDiscordIds = {
 };
 
 // In-memory toggle state: true = queueing enabled
-const coachQueueEnabled = {
+const coachQueueEnabled: Record<string, boolean> = {
   Jeika: true,
   Tugce: true,
   Sandro: true,
@@ -84,11 +81,11 @@ const coachQueueEnabled = {
 };
 
 // ---- Reminder tracking ----
-const reminderSent = {}; // per coach per day
+const reminderSent: Record<string, string> = {}; // per coach per day
 
 // ---- Deduplication sets ----
-const processingMessages = new Set();
-const repliedToday = new Map(); // key `${coach}-${userId}-${date}`
+const processingMessages = new Set<string>();
+const repliedToday = new Map<string, boolean>(); // key `${coach}-${userId}-${date}`
 
 // ---- Time helpers (ET) ----
 function getETParts(date = new Date()) {
@@ -103,7 +100,7 @@ function getETParts(date = new Date()) {
     weekday: 'short',
   });
   const parts = fmt.formatToParts(date);
-  const extract = {};
+  const extract: any = {};
   for (const p of parts) {
     if (p.type === 'year') extract.year = parseInt(p.value, 10);
     if (p.type === 'month') extract.month = parseInt(p.value, 10);
@@ -112,35 +109,37 @@ function getETParts(date = new Date()) {
     if (p.type === 'minute') extract.minute = parseInt(p.value, 10);
     if (p.type === 'weekday') extract.weekday = p.value;
   }
-  return extract;
+  return extract; // weekday like "Mon"
 }
 function isWeekendET(date = new Date()) {
   const etParts = getETParts(date);
   return etParts.weekday === 'Sat' || etParts.weekday === 'Sun';
 }
-function formatETTimeFromParts({ hour, minute }) {
+function formatETTimeFromParts({ hour, minute = 0 }: { hour: number; minute?: number }) {
   let h12 = hour % 12;
   if (h12 === 0) h12 = 12;
   const ampm = hour >= 12 ? 'PM' : 'AM';
   const mm = String(minute).padStart(2, '0');
   return `${h12}:${mm} ${ampm}`;
 }
-function humanReadableNextAvailability(coach, fromDate = new Date()) {
+function humanReadableNextAvailability(coach: string, fromDate = new Date()) {
   const etNow = getETParts(fromDate);
   const todayWeekday = etNow.weekday;
   const schedule = coachHours[coach];
   const nowMinutes = etNow.hour * 60 + etNow.minute;
 
-  function minutes(t) {
+  function minutes(t: { hour: number; minute?: number }) {
     return t.hour * 60 + (t.minute || 0);
   }
 
+  // Weekend -> next Monday first window
   if (todayWeekday === 'Sat' || todayWeekday === 'Sun') {
     const nextWindow = schedule[0];
     const timeStr = formatETTimeFromParts(nextWindow.start);
     return `Monday at ${timeStr}`;
   }
 
+  // Before any window today
   for (const win of schedule) {
     const startMin = minutes(win.start);
     if (nowMinutes < startMin) {
@@ -149,8 +148,9 @@ function humanReadableNextAvailability(coach, fromDate = new Date()) {
     }
   }
 
+  // After today's windows: find next weekday with schedule (skip weekend)
   const weekdayOrder = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  let currentIndex = weekdayOrder.indexOf(etNow.weekday);
+  let currentIndex = weekdayOrder.indexOf(todayWeekday);
   let nextDayName = '';
   for (let i = 1; i <= 7; i++) {
     const candidateIdx = (currentIndex + i) % 7;
@@ -159,7 +159,7 @@ function humanReadableNextAvailability(coach, fromDate = new Date()) {
     nextDayName = candidateWeekday;
     break;
   }
-  const prettyDay = {
+  const prettyDay: Record<string, string> = {
     Sun: 'Sunday',
     Mon: 'Monday',
     Tue: 'Tuesday',
@@ -167,13 +167,14 @@ function humanReadableNextAvailability(coach, fromDate = new Date()) {
     Thu: 'Thursday',
     Fri: 'Friday',
     Sat: 'Saturday',
-  }[nextDayName || 'Monday'];
+  };
+  const dayLabel = prettyDay[nextDayName || 'Mon'];
   const nextWindow = schedule[0];
   const timeStr = formatETTimeFromParts(nextWindow.start);
-  return `${prettyDay} at ${timeStr}`;
+  return `${dayLabel} at ${timeStr}`;
 }
 
-function coachIsActiveNow(coach, date = new Date()) {
+function coachIsActiveNow(coach: string, date = new Date()) {
   if (isWeekendET(date)) return false;
   const etParts = getETParts(date);
   const nowMinutes = etParts.hour * 60 + etParts.minute;
@@ -194,7 +195,7 @@ function todayDateEST() {
   const dd = String(et.day).padStart(2, '0');
   return `${et.year}-${mm}-${dd}`;
 }
-function formatEST(isoOrDate) {
+function formatEST(isoOrDate: string | Date) {
   const d = typeof isoOrDate === 'string' ? new Date(isoOrDate) : isoOrDate;
   return new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
@@ -208,19 +209,26 @@ function formatEST(isoOrDate) {
 const app = express();
 app.get('/', (_, res) => res.send('Bot is running!'));
 
-async function buildAndSendSummaryForCoach(coach) {
+async function buildSummaryTextForCoach(coach: string) {
   const today = todayDateEST();
-  if (!queueTable) return;
+  if (!queueTable) return null;
   const records = await queueTable
     .select({
-      filterByFormula: `AND({Mentioned} = "${coach}", DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD") = "${today}")`,
+      filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
       sort: [{ field: 'Timestamp', direction: 'asc' }],
     })
     .all();
-  if (records.length === 0) return;
 
-  const byStudent = {};
-  records.forEach((r) => {
+  const byStudent: Record<
+    string,
+    {
+      firstSeen: string;
+      channels: Set<string>;
+      messages: Array<{ text: string; timestamp: string; channel: string }>;
+    }
+  > = {};
+
+  records.forEach((r: any) => {
     const user = r.get('User') || 'Unknown';
     const msg = r.get('Message') || '';
     const channel = r.get('Channel') || 'Unknown';
@@ -234,10 +242,7 @@ async function buildAndSendSummaryForCoach(coach) {
       };
     } else {
       byStudent[user].channels.add(channel);
-      if (
-        timestamp &&
-        new Date(timestamp) < new Date(byStudent[user].firstSeen)
-      ) {
+      if (timestamp && new Date(timestamp) < new Date(byStudent[user].firstSeen)) {
         byStudent[user].firstSeen = timestamp;
       }
     }
@@ -250,12 +255,17 @@ async function buildAndSendSummaryForCoach(coach) {
   });
 
   let summaryText = `📋 Queue for **${coach}** today (${today}):\n<@${coachDiscordIds[coach]}>\n\n`;
+  if (Object.keys(byStudent).length === 0) {
+    summaryText += `No one is in the queue — nothing to follow up on.\n`;
+    return summaryText;
+  }
+
   let studentIdx = 1;
   for (const [student, info] of Object.entries(byStudent)) {
     const firstSeenStr = formatEST(info.firstSeen);
     const channelList = [...info.channels].map((c) => `#${c}`).join(', ');
     summaryText += `${studentIdx}. **${student}** (first at ${firstSeenStr} EST in ${channelList}):\n`;
-    const seenMsgs = new Set();
+    const seenMsgs = new Set<string>();
     for (const m of info.messages) {
       const timeStr = formatEST(m.timestamp);
       const key = `${m.text}||${m.channel}||${timeStr}`;
@@ -266,9 +276,35 @@ async function buildAndSendSummaryForCoach(coach) {
     studentIdx += 1;
   }
 
-  const channel = await client.channels.fetch(SUMMARY_CHANNEL_ID);
-  if (channel?.isTextBased?.()) {
-    await channel.send(summaryText);
+  return summaryText;
+}
+
+async function sendSummaryForCoach(coach: string) {
+  const summaryText = await buildSummaryTextForCoach(coach);
+  if (summaryText === null) return; // nothing if table missing
+
+  const coachId = coachDiscordIds[coach];
+  let sentToCoach = false;
+
+  try {
+    const user = await client.users.fetch(coachId);
+    if (user) {
+      await user.send(summaryText);
+      sentToCoach = true;
+    }
+  } catch (dmErr) {
+    console.warn(`⚠️ Could not DM ${coach}, will fallback to summary channel.`, dmErr.message);
+  }
+
+  if (!sentToCoach && SUMMARY_CHANNEL_ID) {
+    try {
+      const channel = await client.channels.fetch(SUMMARY_CHANNEL_ID);
+      if (channel?.isTextBased?.()) {
+        await channel.send(summaryText);
+      }
+    } catch (err) {
+      console.error('❌ Failed to post fallback summary:', err);
+    }
   }
 }
 
@@ -276,7 +312,7 @@ app.get('/run-summary-now', async (req, res) => {
   if (!queueTable) return res.status(500).send('Queue table not configured.');
   try {
     for (const coach of Object.keys(coachDiscordIds)) {
-      await buildAndSendSummaryForCoach(coach);
+      await sendSummaryForCoach(coach);
     }
     res.send('Summary sent manually.');
   } catch (err) {
@@ -292,9 +328,7 @@ setInterval(() => {
   if (SELF_PING_URL) {
     fetch(SELF_PING_URL)
       .then(() => console.log('🔁 Self-ping successful'))
-      .catch((err) =>
-        console.error('❌ Self-ping failed:', err.message)
-      );
+      .catch((err) => console.error('❌ Self-ping failed:', err.message));
   } else {
     console.warn('⚠️ SELF_PING_URL / RENDER_EXTERNAL_URL not set');
   }
@@ -385,7 +419,7 @@ const toggleQueueCommand = new SlashCommandBuilder()
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
 // ---- Role gating helper ----
-async function memberHasRequiredRole(interaction) {
+async function memberHasRequiredRole(interaction: any) {
   if (!REQUIRED_ROLE_ID) return false;
   let member = interaction.member;
   if (!member || !member.roles || !member.roles.cache) {
@@ -401,21 +435,26 @@ async function memberHasRequiredRole(interaction) {
   return member.roles.cache.has(REQUIRED_ROLE_ID);
 }
 
-async function safeReply(interaction, options) {
+async function safeReply(interaction: any, options: any) {
   try {
     if (interaction.replied || interaction.deferred) {
       await interaction.editReply(options);
     } else {
       await interaction.reply(options);
     }
-  } catch (e) {
+  } catch (e: any) {
     console.warn('⚠️ safeReply failure:', e.message);
   }
 }
 
+// helper to find coach name by their own user ID
+function coachNameForDiscordId(id: string) {
+  return Object.entries(coachDiscordIds).find(([, v]) => v === id)?.[0] || null;
+}
+
 // ---- Ready & register commands ----
 client.once(Events.ClientReady, async () => {
-  console.log(`🤖 Discord bot logged in as ${client.user.tag}`);
+  console.log(`🤖 Discord bot logged in as ${client.user?.tag}`);
   try {
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
       body: [
@@ -431,13 +470,8 @@ client.once(Events.ClientReady, async () => {
   }
 });
 
-// helper to find coach name by their own user ID
-function coachNameForDiscordId(id) {
-  return Object.entries(coachDiscordIds).find(([, v]) => v === id)?.[0] || null;
-}
-
 // ---- Interaction handler ----
-client.on(Events.InteractionCreate, async (interaction) => {
+client.on(Events.InteractionCreate, async (interaction: any) => {
   if (!interaction.isChatInputCommand()) return;
   const today = todayDateEST();
 
@@ -452,7 +486,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.commandName === 'queue') {
     const coach = interaction.options.getString('coach');
     if (!queueTable) {
-      await interaction.reply({
+      await safeReply(interaction, {
         content: '⚠️ Queue table not configured properly.',
         flags: 64,
       });
@@ -460,7 +494,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
     try {
       await interaction.deferReply({ flags: 64 });
-      await buildAndSendSummaryForCoach(coach);
+      await sendSummaryForCoach(coach);
       await interaction.editReply({
         content: `✅ Summary for **${coach}** sent.`,
         flags: 64,
@@ -494,7 +528,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.deferReply({ flags: 64 });
       const records = await queueTable
         .select({
-          filterByFormula: `AND({Mentioned} = "${coach}", {User} = "${student}", DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD") = "${today}")`,
+          filterByFormula: `AND({Mentioned} = "${coach}", {User} = "${student}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
         })
         .all();
       if (records.length === 0) {
@@ -503,7 +537,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
         return;
       }
-      const ids = records.map((r) => r.id);
+      const ids = records.map((r: any) => r.id);
       for (let i = 0; i < ids.length; i += 10) {
         await queueTable.destroy(ids.slice(i, i + 10));
       }
@@ -556,7 +590,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
         return;
       }
-      const ids = records.map((r) => r.id);
+      const ids = records.map((r: any) => r.id);
       for (let i = 0; i < ids.length; i += 10) {
         await queueTable.destroy(ids.slice(i, i + 10));
       }
@@ -588,11 +622,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     try {
       const summaryChannel = await client.channels.fetch(SUMMARY_CHANNEL_ID);
       if (summaryChannel?.isTextBased?.()) {
-        await summaryChannel.send(
-          `🔁 **${coachName}** has ${state} their queueing automation.`
-        );
+        await summaryChannel.send(`🔁 **${coachName}** has ${state} their queueing automation.`);
       }
-    } catch (e) {
+    } catch (e: any) {
       console.warn('Failed to log toggle state to summary channel:', e.message);
     }
   }
@@ -609,12 +641,12 @@ client.on(Events.MessageCreate, async (message) => {
   console.log(`[MSG] ${message.author.username}: ${message.content}`);
 
   const mentionedCoach = Object.keys(coachDiscordIds).find((coach) =>
-    message.mentions.users.has(coachDiscordIds[coach])
+    message.mentions.users.has(coachDiscordIds[coach] as any)
   );
   if (!mentionedCoach) return;
 
   const todayKey = `${mentionedCoach}-${message.author.id}-${todayDateEST()}`;
-  const alreadyReplied = repliedToday.has(todayKey); // used only to gate reply, not queueing
+  const alreadyReplied = repliedToday.has(todayKey); // only gates messaging, not queue updates
 
   const now = new Date();
   const active = coachIsActiveNow(mentionedCoach, now);
@@ -663,7 +695,7 @@ client.on(Events.MessageCreate, async (message) => {
   const username = message.author.username;
 
   try {
-    const filter = `AND({Mentioned} = "${mentionedCoach}", {User} = "${username}", DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD") = "${today}")`;
+    const filter = `AND({Mentioned} = "${mentionedCoach}", {User} = "${username}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`;
     const existing = await queueTable
       .select({
         filterByFormula: filter,
@@ -685,9 +717,7 @@ client.on(Events.MessageCreate, async (message) => {
     } else {
       const existingRecord = existing[0];
       const prevMsg = existingRecord.get('Message') || '';
-      const updated = prevMsg
-        ? `${prevMsg}\n- ${message.content}`
-        : message.content;
+      const updated = prevMsg ? `${prevMsg}\n- ${message.content}` : message.content;
       await queueTable.update(existingRecord.id, {
         Message: updated,
         Channel: message.channel?.name || 'Unknown',
@@ -697,7 +727,6 @@ client.on(Events.MessageCreate, async (message) => {
       );
     }
 
-    // Reply once per day per coach-user
     if (!alreadyReplied) {
       const nextAvailStr = humanReadableNextAvailability(mentionedCoach, now);
       const replyMessage = `Thank you for your message! Coach ${mentionedCoach} is currently out of office and will be back at ${nextAvailStr} EST. Don’t worry—I’ll make sure you’re on their radar when they return.`;
@@ -728,7 +757,7 @@ cron.schedule(
     console.log('🕗 Running daily summary job for', today);
     try {
       for (const coach of Object.keys(coachDiscordIds)) {
-        await buildAndSendSummaryForCoach(coach);
+        await sendSummaryForCoach(coach);
       }
     } catch (err) {
       console.error('❌ Summary error:', err);
