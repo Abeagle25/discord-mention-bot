@@ -37,7 +37,7 @@ console.log(`Using SUMMARY_CHANNEL_ID: ${SUMMARY_CHANNEL_ID ? '✅ Set' : '❌ N
 console.log(`Using REQUIRED_ROLE_ID: ${REQUIRED_ROLE_ID ? '✅ Set' : '❌ Not Set'}`);
 
 // ---- Airtable setup ----
-let queueTable: any = null;
+let queueTable = null;
 if (AIRTABLE_API_KEY && AIRTABLE_BASE_ID && AIRTABLE_TABLE_NAME) {
   const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
   queueTable = base(AIRTABLE_TABLE_NAME);
@@ -47,10 +47,7 @@ if (AIRTABLE_API_KEY && AIRTABLE_BASE_ID && AIRTABLE_TABLE_NAME) {
 
 // ---- Coaches config ----
 // Active windows per coach in ET
-const coachHours: Record<
-  string,
-  Array<{ start: { hour: number; minute?: number }; end: { hour: number; minute?: number } }>
-> = {
+const coachHours = {
   Jeika: [{ start: { hour: 10, minute: 0 }, end: { hour: 15, minute: 0 } }],
   Tugce: [{ start: { hour: 8, minute: 0 }, end: { hour: 18, minute: 0 } }],
   Sandro: [{ start: { hour: 6, minute: 0 }, end: { hour: 16, minute: 0 } }],
@@ -61,7 +58,8 @@ const coachHours: Record<
     { start: { hour: 20, minute: 0 }, end: { hour: 0, minute: 0 } },
   ],
 };
-const coachDiscordIds: Record<string, string> = {
+
+const coachDiscordIds = {
   Jeika: '852485920023117854',
   Tugce: '454775533671284746',
   Sandro: '814382156633079828',
@@ -71,7 +69,7 @@ const coachDiscordIds: Record<string, string> = {
 };
 
 // In-memory toggle state: true = queueing enabled
-const coachQueueEnabled: Record<string, boolean> = {
+const coachQueueEnabled = {
   Jeika: true,
   Tugce: true,
   Sandro: true,
@@ -80,12 +78,12 @@ const coachQueueEnabled: Record<string, boolean> = {
   Michael: true,
 };
 
-// ---- Reminder tracking ----
-const reminderSent: Record<string, string> = {}; // per coach per day
+// ---- Reminder tracking (unused but kept) ----
+const reminderSent = {}; // per coach per day
 
 // ---- Deduplication sets ----
-const processingMessages = new Set<string>();
-const repliedToday = new Map<string, boolean>(); // key `${coach}-${userId}-${date}`
+const processingMessages = new Set();
+const repliedToday = new Map(); // key `${coach}-${userId}-${date}`
 
 // ---- Time helpers (ET) ----
 function getETParts(date = new Date()) {
@@ -100,35 +98,35 @@ function getETParts(date = new Date()) {
     weekday: 'short',
   });
   const parts = fmt.formatToParts(date);
-  const extract: any = {};
+  const extract = {};
   for (const p of parts) {
     if (p.type === 'year') extract.year = parseInt(p.value, 10);
     if (p.type === 'month') extract.month = parseInt(p.value, 10);
     if (p.type === 'day') extract.day = parseInt(p.value, 10);
     if (p.type === 'hour') extract.hour = parseInt(p.value, 10);
     if (p.type === 'minute') extract.minute = parseInt(p.value, 10);
-    if (p.type === 'weekday') extract.weekday = p.value;
+    if (p.type === 'weekday') extract.weekday = p.value; // e.g., "Mon"
   }
-  return extract; // weekday like "Mon"
+  return extract;
 }
 function isWeekendET(date = new Date()) {
   const etParts = getETParts(date);
   return etParts.weekday === 'Sat' || etParts.weekday === 'Sun';
 }
-function formatETTimeFromParts({ hour, minute = 0 }: { hour: number; minute?: number }) {
+function formatETTimeFromParts({ hour, minute = 0 }) {
   let h12 = hour % 12;
   if (h12 === 0) h12 = 12;
   const ampm = hour >= 12 ? 'PM' : 'AM';
   const mm = String(minute).padStart(2, '0');
   return `${h12}:${mm} ${ampm}`;
 }
-function humanReadableNextAvailability(coach: string, fromDate = new Date()) {
+function humanReadableNextAvailability(coach, fromDate = new Date()) {
   const etNow = getETParts(fromDate);
   const todayWeekday = etNow.weekday;
   const schedule = coachHours[coach];
   const nowMinutes = etNow.hour * 60 + etNow.minute;
 
-  function minutes(t: { hour: number; minute?: number }) {
+  function minutes(t) {
     return t.hour * 60 + (t.minute || 0);
   }
 
@@ -159,7 +157,7 @@ function humanReadableNextAvailability(coach: string, fromDate = new Date()) {
     nextDayName = candidateWeekday;
     break;
   }
-  const prettyDay: Record<string, string> = {
+  const prettyDay = {
     Sun: 'Sunday',
     Mon: 'Monday',
     Tue: 'Tuesday',
@@ -174,7 +172,7 @@ function humanReadableNextAvailability(coach: string, fromDate = new Date()) {
   return `${dayLabel} at ${timeStr}`;
 }
 
-function coachIsActiveNow(coach: string, date = new Date()) {
+function coachIsActiveNow(coach, date = new Date()) {
   if (isWeekendET(date)) return false;
   const etParts = getETParts(date);
   const nowMinutes = etParts.hour * 60 + etParts.minute;
@@ -182,7 +180,7 @@ function coachIsActiveNow(coach: string, date = new Date()) {
   for (const win of schedule) {
     let startMin = win.start.hour * 60 + (win.start.minute || 0);
     let endMin = win.end.hour * 60 + (win.end.minute || 0);
-    if (endMin === 0) endMin = 24 * 60;
+    if (endMin === 0) endMin = 24 * 60; // midnight
     if (nowMinutes >= startMin && nowMinutes < endMin) {
       return true;
     }
@@ -195,7 +193,7 @@ function todayDateEST() {
   const dd = String(et.day).padStart(2, '0');
   return `${et.year}-${mm}-${dd}`;
 }
-function formatEST(isoOrDate: string | Date) {
+function formatEST(isoOrDate) {
   const d = typeof isoOrDate === 'string' ? new Date(isoOrDate) : isoOrDate;
   return new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
@@ -209,26 +207,20 @@ function formatEST(isoOrDate: string | Date) {
 const app = express();
 app.get('/', (_, res) => res.send('Bot is running!'));
 
-async function buildSummaryTextForCoach(coach: string) {
+async function buildSummaryTextForCoach(coach) {
   const today = todayDateEST();
   if (!queueTable) return null;
   const records = await queueTable
     .select({
-      filterByFormula: `AND({Mentioned} = "${coach}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
+      // Use a simple string comparison on the formatted date (stable)
+      filterByFormula: `AND({Mentioned} = "${coach}", DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD") = "${today}")`,
       sort: [{ field: 'Timestamp', direction: 'asc' }],
     })
     .all();
 
-  const byStudent: Record<
-    string,
-    {
-      firstSeen: string;
-      channels: Set<string>;
-      messages: Array<{ text: string; timestamp: string; channel: string }>;
-    }
-  > = {};
+  const byStudent = {};
 
-  records.forEach((r: any) => {
+  records.forEach((r) => {
     const user = r.get('User') || 'Unknown';
     const msg = r.get('Message') || '';
     const channel = r.get('Channel') || 'Unknown';
@@ -265,7 +257,7 @@ async function buildSummaryTextForCoach(coach: string) {
     const firstSeenStr = formatEST(info.firstSeen);
     const channelList = [...info.channels].map((c) => `#${c}`).join(', ');
     summaryText += `${studentIdx}. **${student}** (first at ${firstSeenStr} EST in ${channelList}):\n`;
-    const seenMsgs = new Set<string>();
+    const seenMsgs = new Set();
     for (const m of info.messages) {
       const timeStr = formatEST(m.timestamp);
       const key = `${m.text}||${m.channel}||${timeStr}`;
@@ -279,7 +271,7 @@ async function buildSummaryTextForCoach(coach: string) {
   return summaryText;
 }
 
-async function sendSummaryForCoach(coach: string) {
+async function sendSummaryForCoach(coach) {
   const summaryText = await buildSummaryTextForCoach(coach);
   if (summaryText === null) return; // nothing if table missing
 
@@ -390,7 +382,7 @@ const clearEntryCommand = new SlashCommandBuilder()
 
 const clearAllCommand = new SlashCommandBuilder()
   .setName('clearall')
-  .setDescription("Clear the entire queue for a coach (all dates, requires confirmation)")
+  .setDescription('Clear the entire queue for a coach (all dates, requires confirmation)')
   .addStringOption((opt) =>
     opt
       .setName('coach')
@@ -419,7 +411,7 @@ const toggleQueueCommand = new SlashCommandBuilder()
 const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
 // ---- Role gating helper ----
-async function memberHasRequiredRole(interaction: any) {
+async function memberHasRequiredRole(interaction) {
   if (!REQUIRED_ROLE_ID) return false;
   let member = interaction.member;
   if (!member || !member.roles || !member.roles.cache) {
@@ -435,20 +427,20 @@ async function memberHasRequiredRole(interaction: any) {
   return member.roles.cache.has(REQUIRED_ROLE_ID);
 }
 
-async function safeReply(interaction: any, options: any) {
+async function safeReply(interaction, options) {
   try {
     if (interaction.replied || interaction.deferred) {
       await interaction.editReply(options);
     } else {
       await interaction.reply(options);
     }
-  } catch (e: any) {
+  } catch (e) {
     console.warn('⚠️ safeReply failure:', e.message);
   }
 }
 
 // helper to find coach name by their own user ID
-function coachNameForDiscordId(id: string) {
+function coachNameForDiscordId(id) {
   return Object.entries(coachDiscordIds).find(([, v]) => v === id)?.[0] || null;
 }
 
@@ -471,7 +463,7 @@ client.once(Events.ClientReady, async () => {
 });
 
 // ---- Interaction handler ----
-client.on(Events.InteractionCreate, async (interaction: any) => {
+client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   const today = todayDateEST();
 
@@ -528,7 +520,7 @@ client.on(Events.InteractionCreate, async (interaction: any) => {
       await interaction.deferReply({ flags: 64 });
       const records = await queueTable
         .select({
-          filterByFormula: `AND({Mentioned} = "${coach}", {User} = "${student}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`,
+          filterByFormula: `AND({Mentioned} = "${coach}", {User} = "${student}", DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD") = "${today}")`,
         })
         .all();
       if (records.length === 0) {
@@ -537,7 +529,7 @@ client.on(Events.InteractionCreate, async (interaction: any) => {
         });
         return;
       }
-      const ids = records.map((r: any) => r.id);
+      const ids = records.map((r) => r.id);
       for (let i = 0; i < ids.length; i += 10) {
         await queueTable.destroy(ids.slice(i, i + 10));
       }
@@ -590,7 +582,7 @@ client.on(Events.InteractionCreate, async (interaction: any) => {
         });
         return;
       }
-      const ids = records.map((r: any) => r.id);
+      const ids = records.map((r) => r.id);
       for (let i = 0; i < ids.length; i += 10) {
         await queueTable.destroy(ids.slice(i, i + 10));
       }
@@ -624,7 +616,7 @@ client.on(Events.InteractionCreate, async (interaction: any) => {
       if (summaryChannel?.isTextBased?.()) {
         await summaryChannel.send(`🔁 **${coachName}** has ${state} their queueing automation.`);
       }
-    } catch (e: any) {
+    } catch (e) {
       console.warn('Failed to log toggle state to summary channel:', e.message);
     }
   }
@@ -641,7 +633,7 @@ client.on(Events.MessageCreate, async (message) => {
   console.log(`[MSG] ${message.author.username}: ${message.content}`);
 
   const mentionedCoach = Object.keys(coachDiscordIds).find((coach) =>
-    message.mentions.users.has(coachDiscordIds[coach] as any)
+    message.mentions.users.has(coachDiscordIds[coach])
   );
   if (!mentionedCoach) return;
 
@@ -695,7 +687,7 @@ client.on(Events.MessageCreate, async (message) => {
   const username = message.author.username;
 
   try {
-    const filter = `AND({Mentioned} = "${mentionedCoach}", {User} = "${username}", IS_SAME(DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD"), "${today}"))`;
+    const filter = `AND({Mentioned} = "${mentionedCoach}", {User} = "${username}", DATETIME_FORMAT({Timestamp}, "YYYY-MM-DD") = "${today}")`;
     const existing = await queueTable
       .select({
         filterByFormula: filter,
